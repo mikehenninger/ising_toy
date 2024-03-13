@@ -5,8 +5,8 @@ use plotly::{HeatMap, ImageFormat, Layout, Plot};
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
 pub static DEFAULT_TEMPERATURE: f64 = 0.5;
 pub static DEFAULT_EXTERNAL_FIELD: f64 = -0.0;
-pub static N_ROWS: usize = 50;
-pub static N_COLUMNS: usize = 50;
+pub static N_ROWS: usize = 150;
+pub static N_COLUMNS: usize = 150;
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
