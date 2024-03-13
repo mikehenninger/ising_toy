@@ -2,12 +2,11 @@ use std::ops::{Index, IndexMut};
 
 use plotly::common::Title;
 use plotly::{HeatMap, ImageFormat, Layout, Plot};
-//pub static DEFAULT_MAGNETIZATION: f64 = 1.0;
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
-pub static DEFAULT_TEMPERATURE: f64 = 2.5;
-pub static DEFAULT_EXTERNAL_FIELD: f64 = -0.005;
-pub static N_ROWS: usize = 10;
-pub static N_COLUMNS: usize = 20;
+pub static DEFAULT_TEMPERATURE: f64 = 0.5;
+pub static DEFAULT_EXTERNAL_FIELD: f64 = -0.0;
+pub static N_ROWS: usize = 50;
+pub static N_COLUMNS: usize = 50;
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
@@ -26,18 +25,14 @@ impl Broadcast for Matrix<f64> {
         return self.clone();
     }
 }
-pub struct Matrix<T> {
+pub struct Matrix<T: Clone> {
     pub n_rows: usize,
     pub n_cols: usize,
     pub data: Vec<T>,
 }
 
-impl<T> Matrix<T> {
-    pub fn as_vec_vec(&self) -> Vec<Vec<T>>
-    // I want to declare T:clone at the struct def level; dunno how
-    where
-        T: Clone,
-    {
+impl<T: Clone> Matrix<T> {
+    pub fn as_vec_vec(&self) -> Vec<Vec<T>> {
         let mut vec_vec = Vec::new();
         for i in 0..self.n_rows {
             //TODO: VECTORIZE THIS
@@ -49,10 +44,7 @@ impl<T> Matrix<T> {
         }
         vec_vec
     }
-    pub fn new(n_rows: usize, n_cols: usize, data: Vec<T>) -> Self
-    where
-        T: Clone,
-    {
+    pub fn new(n_rows: usize, n_cols: usize, data: Vec<T>) -> Self {
         assert_eq!(
             n_rows * n_cols,
             data.len(),
@@ -80,7 +72,7 @@ impl<T> Matrix<T> {
     }
 }
 
-impl<T> Index<(usize, usize)> for Matrix<T> {
+impl<T: Clone> Index<(usize, usize)> for Matrix<T> {
     type Output = T;
 
     fn index(&self, index: (usize, usize)) -> &Self::Output {
@@ -92,7 +84,7 @@ impl<T> Index<(usize, usize)> for Matrix<T> {
     }
 }
 
-impl<T> IndexMut<(usize, usize)> for Matrix<T> {
+impl<T: Clone> IndexMut<(usize, usize)> for Matrix<T> {
     //type Output = T;
 
     fn index_mut(&mut self, index: (usize, usize)) -> &mut Self::Output {
@@ -218,8 +210,9 @@ impl Lattice {
         let e_site = (self.local_hamiltonian)(&self, &self.hamiltonian_map, (i, j));
         let t_site = self.sites[(ui, uj)].temperature;
         let p_state =
-            (e_site / t_site).exp() / ((e_site / t_site).exp() + (-e_site / t_site).exp());
+            (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
         let r: f64 = rand::random();
+        //println!("p: {}, e: {}", p_state, e_site);
         if r > p_state {
             self.sites[(ui, uj)].magnetic_moment = -self.sites[(ui, uj)].magnetic_moment;
         }
@@ -231,13 +224,22 @@ impl Lattice {
         hamiltonian_map: Matrix<f64>,
     ) -> Lattice {
         let mut all_sites: Vec<LatticeSite> = Vec::new();
-
+        let mut r: f64;
         for _ in 0..N_COLUMNS * N_ROWS {
-            all_sites.push(LatticeSite::new(
-                DEFAULT_MAGNETIC_MOMENT,
-                DEFAULT_TEMPERATURE,
-                DEFAULT_EXTERNAL_FIELD,
-            ));
+            r = rand::random();
+            if r > 0.5 {
+                all_sites.push(LatticeSite::new(
+                    DEFAULT_MAGNETIC_MOMENT,
+                    DEFAULT_TEMPERATURE,
+                    DEFAULT_EXTERNAL_FIELD,
+                ));
+            } else {
+                all_sites.push(LatticeSite::new(
+                    -DEFAULT_MAGNETIC_MOMENT,
+                    DEFAULT_TEMPERATURE,
+                    DEFAULT_EXTERNAL_FIELD,
+                ));
+            }
         }
 
         return Lattice {
@@ -260,13 +262,19 @@ impl Lattice {
 pub fn a_hamiltonian(lattice: &Lattice, hamiltonian_map: &Matrix<f64>, index: (i64, i64)) -> f64 {
     let site = &lattice.sites[lattice.sites.wrap(index)];
     let mut energy = -(site.magnetic_moment) * site.external_field;
+    let offset = (
+        (hamiltonian_map.n_cols / 2) as i64,
+        (hamiltonian_map.n_rows / 2) as i64,
+    );
 
     for i in 0..hamiltonian_map.n_rows {
         for j in 0..hamiltonian_map.n_cols {
             energy += -(site.magnetic_moment)
                 * hamiltonian_map[(i, j)]
-                * lattice.sites[lattice.sites.wrap((i as i64 + index.0, j as i64 + index.1))]
-                    .magnetic_moment;
+                * lattice.sites[lattice
+                    .sites
+                    .wrap((i as i64 + index.0 - offset.0, j as i64 + index.1 - offset.1))]
+                .magnetic_moment;
         }
     }
     return energy;
