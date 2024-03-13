@@ -251,6 +251,15 @@ impl Lattice {
             hamiltonian_map,
         };
     }
+    pub fn net_magnetization(&self) -> f64 {
+        let mut net_magnetization = 0.0;
+        for i in 0..self.n_rows {
+            for j in 0..self.n_columns {
+                net_magnetization += self.sites[(i, j)].magnetic_moment;
+            }
+        }
+        return net_magnetization;
+    }
 }
 
 /// A hamiltonian function that is not a method because it can be swapped out
@@ -281,6 +290,18 @@ pub fn a_hamiltonian(lattice: &Lattice, hamiltonian_map: &Matrix<f64>, index: (i
     return energy;
 }
 
+pub fn row_edit<T: Clone>(mat: &mut Matrix<T>, row: usize, values: Vec<T>) -> () {
+    for i in 0..mat.n_cols {
+        mat.data[row * mat.n_cols + i] = values[i].clone();
+    }
+}
+
+pub fn column_edit<T: Clone>(mat: &mut Matrix<T>, column: usize, values: Vec<T>) -> () {
+    for i in 0..mat.n_rows {
+        mat.data[i * mat.n_cols + column] = values[i].clone();
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -296,5 +317,39 @@ mod tests {
         assert_eq!(d.data, vec![1.0; 4]);
         assert_eq!(b.n_rows, shape.0);
         assert_eq!(b.n_cols, shape.1);
+    }
+
+    #[test]
+    fn test_matrix_creation() {
+        let matrix = Matrix::new(2, 3, vec![1, 2, 3, 4, 5, 6]);
+        assert_eq!(matrix.n_rows, 2);
+        assert_eq!(matrix.n_cols, 3);
+        assert_eq!(matrix.data, vec![1, 2, 3, 4, 5, 6]);
+    }
+
+    #[test]
+    fn test_matrix_indexing() {
+        let matrix = Matrix::new(2, 2, vec![1, 2, 3, 4]);
+        assert_eq!(matrix[(0, 0)], 1);
+        assert_eq!(matrix[(0, 1)], 2);
+        assert_eq!(matrix[(1, 0)], 3);
+        assert_eq!(matrix[(1, 1)], 4);
+    }
+
+    #[test]
+    fn test_matrix_index_mut() {
+        let mut matrix = Matrix::new(2, 2, vec![1, 2, 3, 4]);
+        matrix[(0, 0)] = 5;
+        matrix[(1, 1)] = 6;
+        assert_eq!(matrix[(0, 0)], 5);
+        assert_eq!(matrix[(1, 1)], 6);
+    }
+
+    #[test]
+    fn test_matrix_wrap() {
+        let matrix = Matrix::new(3, 3, vec![1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        assert_eq!(matrix.wrap((-1, -1)), (2, 2));
+        assert_eq!(matrix.wrap((3, 3)), (0, 0));
+        assert_eq!(matrix.wrap((5, 5)), (2, 2));
     }
 }

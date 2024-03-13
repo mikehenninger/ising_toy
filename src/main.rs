@@ -16,7 +16,7 @@ use plotly::{HeatMap, ImageFormat, Layout, Plot};
 
 fn main() {
     let hsize: (usize, usize) = (3, 3);
-    let mut hmap = Matrix::new(hsize.0, hsize.1, vec![0.5; hsize.0 * hsize.1]);
+    let mut hmap = Matrix::new(hsize.0, hsize.1, vec![1.0; hsize.0 * hsize.1]);
     hmap[(0, 0)] = 0.0;
     hmap[(0, 2)] = 0.0;
     hmap[(2, 0)] = 0.0;
@@ -25,7 +25,7 @@ fn main() {
     let mut lattice = Lattice::new(N_ROWS, N_COLUMNS, a_hamiltonian, hmap);
 
     let new_vec_external_field = (-25..25)
-        .map(|x| (x as f64) / 1000.0)
+        .map(|x| (x as f64) * 0.0)
         .collect::<Vec<f64>>()
         .repeat(lattice.n_rows);
     let mut new_temperature = Matrix::new(
@@ -34,13 +34,13 @@ fn main() {
         vec![0.0; lattice.n_rows * lattice.n_columns],
     );
 
-    for i in 0..lattice.n_rows {
-        for j in 0..lattice.n_columns {
-            //i+1 to avoid div by zero when calculating boltzmann factor
-            new_temperature[(i, j)] = ((i + 1) as f64) / 10.0;
-        }
-    }
-    let new_ext_field = Matrix::new(lattice.n_rows, lattice.n_columns, new_vec_external_field);
+    // for i in 0..lattice.n_rows {
+    //     for j in 0..lattice.n_columns {
+    //         //i+1 to avoid div by zero when calculating boltzmann factor
+    //         new_temperature[(i, j)] = ((i + 1) as f64) / 50.0;
+    //     }
+    // }
+    let mut new_ext_field = Matrix::new(lattice.n_rows, lattice.n_columns, new_vec_external_field);
     //new_ext_field[(0, 0)] = 50.0;
     let mut plot = Plot::new();
     let trace = HeatMap::new_z(new_ext_field.as_vec_vec());
@@ -60,17 +60,32 @@ fn main() {
     plot.show();
 
     //lattice.sequential_update();
-    lattice.set_external_field(new_ext_field);
+    lattice.set_external_field(new_ext_field.clone());
     lattice.set_temperature(new_temperature);
-    let max_iter = 1000;
+    let max_iter = 5000;
+    let mut mag_over_time: Vec<f64> = Vec::new();
+    let mut temperature_over_time: Vec<f64> = Vec::new();
     for idx_t in 0..max_iter {
+        lattice.sequential_update();
+        let mut current_temp = 5.01 - (idx_t as f64 / (max_iter as f64) * 5.0);
+        lattice.set_temperature(current_temp);
         println!("Energy: {}", lattice.energy());
+        let current_mag = lattice.net_magnetization();
+        println!("Magnetization: {}", current_mag);
+        mag_over_time.push(current_mag);
 
+        temperature_over_time.push(current_temp);
         if idx_t % (max_iter / 10) as i32 == 0 {
             lattice.moments_as_heatmap();
         }
-        lattice.sequential_update();
-        //lattice.update((1, 1))
+
+        println!("Temperature: {}", current_temp);
     }
     println!("Energy: {}", lattice.energy());
+    let mut mag_plot = Plot::new();
+    let mag_trace = plotly::Scatter::new(temperature_over_time, mag_over_time);
+    let layout = Layout::new().title(Title::new("Magnetization vs temperature"));
+    mag_plot.add_trace(mag_trace);
+    mag_plot.set_layout(layout);
+    mag_plot.show();
 }
