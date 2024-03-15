@@ -1,4 +1,4 @@
-// turn below off for final checking
+// turn below off for final checking before "a release"
 #![allow(unused_imports)]
 #![allow(unused_variables)]
 #![allow(dead_code)]
@@ -6,7 +6,6 @@
 //! # doc test
 //!
 use hello_rust::*;
-use std::cell::RefCell;
 
 use plotly::common::Title;
 use plotly::{HeatMap, ImageFormat, Layout, Plot};
@@ -24,7 +23,7 @@ fn main() {
     hmap[(1, 1)] = 0.0;
     let mut lattice = Lattice::new(N_ROWS, N_COLUMNS, a_hamiltonian, hmap);
 
-    let new_vec_external_field = (-25..25)
+    let new_vec_external_field = (-250..250)
         .map(|x| (x as f64) * 0.0)
         .collect::<Vec<f64>>()
         .repeat(lattice.n_rows);
@@ -61,31 +60,42 @@ fn main() {
 
     //lattice.sequential_update();
     lattice.set_external_field(new_ext_field.clone());
-    lattice.set_temperature(new_temperature);
-    let max_iter = 5000;
+    //lattice.set_temperature(new_temperature);
+    let max_iter = 2000;
     let mut mag_over_time: Vec<f64> = Vec::new();
+    let mut energy_over_time: Vec<f64> = Vec::new();
     let mut temperature_over_time: Vec<f64> = Vec::new();
     for idx_t in 0..max_iter {
-        lattice.sequential_update();
         let mut current_temp = 5.01 - (idx_t as f64 / (max_iter as f64) * 5.0);
         lattice.set_temperature(current_temp);
-        println!("Energy: {}", lattice.energy());
+
+        lattice.sequential_update();
+        let current_energy = lattice.energy();
+        println!("Energy: {}", current_energy);
+        energy_over_time.push(current_energy);
         let current_mag = lattice.net_magnetization();
         println!("Magnetization: {}", current_mag);
         mag_over_time.push(current_mag);
 
         temperature_over_time.push(current_temp);
-        if idx_t % (max_iter / 10) as i32 == 0 {
-            lattice.moments_as_heatmap();
+        if idx_t % (max_iter as f64 / 1.01) as i32 == 0 {
+            lattice.moments_as_heatmap(format!(" current_temp: {}", current_temp));
         }
 
         println!("Temperature: {}", current_temp);
     }
     println!("Energy: {}", lattice.energy());
     let mut mag_plot = Plot::new();
-    let mag_trace = plotly::Scatter::new(temperature_over_time, mag_over_time);
+    let mag_trace = plotly::Scatter::new(temperature_over_time.clone(), mag_over_time);
     let layout = Layout::new().title(Title::new("Magnetization vs temperature"));
     mag_plot.add_trace(mag_trace);
     mag_plot.set_layout(layout);
     mag_plot.show();
+
+    let mut energy_plot = Plot::new();
+    let energy_trace = plotly::Scatter::new(temperature_over_time, energy_over_time);
+    let layout = Layout::new().title(Title::new("Energy vs temperature"));
+    energy_plot.add_trace(energy_trace);
+    energy_plot.set_layout(layout);
+    energy_plot.show();
 }

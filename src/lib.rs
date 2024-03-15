@@ -1,12 +1,14 @@
 use std::ops::{Index, IndexMut};
-
+use std::sync::{Arc, Mutex};
+use std::thread;
+TODO: use RWLock on read-only goodies.
 use plotly::common::Title;
 use plotly::{HeatMap, ImageFormat, Layout, Plot};
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
 pub static DEFAULT_TEMPERATURE: f64 = 0.5;
 pub static DEFAULT_EXTERNAL_FIELD: f64 = -0.0;
-pub static N_ROWS: usize = 50;
-pub static N_COLUMNS: usize = 50;
+pub static N_ROWS: usize = 500;
+pub static N_COLUMNS: usize = 500;
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
@@ -135,10 +137,18 @@ impl LatticeSite {
     }
 }
 
+pub struct HamiltonianAndMap {
+    hamiltonian: fn(&Lattice, &Matrix<f64>, (i64, i64)) -> f64,
+    hamiltonian_map: Matrix<f64>,
+}
+
 pub struct Lattice {
     pub n_rows: usize,
     pub n_columns: usize,
+    //TODO: make a second blitting sites matrix for the next state, though write
+    //the code to expose only sites when done updating
     pub sites: Matrix<LatticeSite>,
+    scratch_sites: Matrix<Arc<Mutex<LatticeSite>>>,
     pub local_hamiltonian: fn(&Lattice, &Matrix<f64>, (i64, i64)) -> f64,
     pub hamiltonian_map: Matrix<f64>,
 }
@@ -178,18 +188,54 @@ impl Lattice {
         vec_vec
     }
     pub fn sequential_update(&mut self) -> () {
+        let mut handles = vec![];
         for i in 0..self.n_rows {
             for j in 0..self.n_columns {
-                self.update((i as i64, j as i64));
+                let ii = i;
+                let jj = j;
+                let (ui, uj) = self.sites.wrap((ii as i64, jj as i64));
+                let t_site = self.sites[(ui, uj)].temperature;
+                let scratch_element = Arc::clone(&self.scratch_sites[(i, j)]);
+                let temp_h: &Matrix<f64> = &self.hamiltonian_map.clone();
+                //let update_closure = || self.update_scratch((i.clone() as i64, j.clone() as i64));
+                let handle = thread::spawn(move || {
+                    
+                    let e_site = (self.local_hamiltonian)(&self, temp_h, (ii as i64, jj as i64));
+
+                    let p_state = (-e_site / t_site).exp()
+                        / ((-e_site / t_site).exp() + (e_site / t_site).exp());
+                    let r: f64 = rand::random();
+                    if r > p_state {
+                        scratch_element.lock().unwrap().magnetic_moment =
+                            -self.sites[(ui, uj)].magnetic_moment;
+                    }
+                });
+                handles.push(handle);
+            }
+        }
+        self.copy_from_scratch();
+    }
+    fn copy_to_scratch(&mut self) -> () {
+        for i in 0..self.n_rows {
+            //todo: vectorize
+            for j in 0..self.n_columns {
+                *self.scratch_sites[(i, j)].lock().unwrap() = self.sites[(i, j)].clone();
+            }
+        }
+    }
+    fn copy_from_scratch(&mut self) -> () {
+        for i in 0..self.n_rows {
+            for j in 0..self.n_columns {
+                self.sites[(i, j)] = (*self.scratch_sites[(i, j)].lock().unwrap()).clone();
             }
         }
     }
 
-    pub fn moments_as_heatmap(&self) -> () {
+    pub fn moments_as_heatmap(&self, title_extension: String) -> () {
         let trace = HeatMap::new_z(self.moments_as_vec_vec());
 
         let mut plot = Plot::new();
-        let title = Title::new("Magnetic Moments");
+        let title = Title::new(("Magnetic Moments".to_string() + (&title_extension)).as_str());
         let layout = Layout::new().title(title).width(800).height(800);
         plot.add_trace(trace);
         plot.set_layout(layout);
@@ -208,14 +254,38 @@ impl Lattice {
     }
     pub fn update(&mut self, (i, j): (i64, i64)) -> () {
         let (ui, uj) = self.sites.wrap((i, j));
-        let e_site = (self.local_hamiltonian)(&self, &self.hamiltonian_map, (i, j));
+
+        let temp_h: &mut Matrix<f64> = &mut self.hamiltonian_map.clone();
+        // if ui > self.n_rows / 2 {
+        //     for i in 0..temp_h.n_rows {
+        //         for j in 0..temp_h.n_cols {
+        //             temp_h[(i, j)] = -temp_h[(i, j)];
+        //         }
+        //     }
+        // }
+        let e_site = (self.local_hamiltonian)(&self, temp_h, (i, j));
         let t_site = self.sites[(ui, uj)].temperature;
         let p_state =
             (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
         let r: f64 = rand::random();
-        //println!("p: {}, e: {}", p_state, e_site);
         if r > p_state {
             self.sites[(ui, uj)].magnetic_moment = -self.sites[(ui, uj)].magnetic_moment;
+        }
+    }
+
+    //XXX update this to take only scratch lattice_site that knows its location?
+    pub fn update_scratch(&self, (i, j): (i64, i64)) -> () {
+        let (ui, uj) = self.sites.wrap((i, j));
+
+        let temp_h: &Matrix<f64> = &self.hamiltonian_map.clone();
+        let e_site = (self.local_hamiltonian)(&self, temp_h, (i, j));
+        let t_site = self.sites[(ui, uj)].temperature;
+        let p_state =
+            (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
+        let r: f64 = rand::random();
+        if r > p_state {
+            self.scratch_sites[(ui, uj)].lock().unwrap().magnetic_moment =
+                -self.sites[(ui, uj)].magnetic_moment;
         }
     }
     pub fn new(
@@ -225,6 +295,7 @@ impl Lattice {
         hamiltonian_map: Matrix<f64>,
     ) -> Lattice {
         let mut all_sites: Vec<LatticeSite> = Vec::new();
+        let mut all_sites_scratch: Vec<Arc<Mutex<LatticeSite>>> = Vec::new();
         let mut r: f64;
         for _ in 0..N_COLUMNS * N_ROWS {
             r = rand::random();
@@ -234,12 +305,22 @@ impl Lattice {
                     DEFAULT_TEMPERATURE,
                     DEFAULT_EXTERNAL_FIELD,
                 ));
+                all_sites_scratch.push(Arc::new(Mutex::new(LatticeSite::new(
+                    DEFAULT_MAGNETIC_MOMENT,
+                    DEFAULT_TEMPERATURE,
+                    DEFAULT_EXTERNAL_FIELD,
+                ))));
             } else {
                 all_sites.push(LatticeSite::new(
                     -DEFAULT_MAGNETIC_MOMENT,
                     DEFAULT_TEMPERATURE,
                     DEFAULT_EXTERNAL_FIELD,
                 ));
+                all_sites_scratch.push(Arc::new(Mutex::new(LatticeSite::new(
+                    -DEFAULT_MAGNETIC_MOMENT,
+                    DEFAULT_TEMPERATURE,
+                    DEFAULT_EXTERNAL_FIELD,
+                ))));
             }
         }
 
@@ -247,6 +328,7 @@ impl Lattice {
             n_rows,
             n_columns,
             sites: Matrix::new(N_ROWS, N_COLUMNS, all_sites),
+            scratch_sites: Matrix::new(N_ROWS, N_COLUMNS, all_sites_scratch),
             local_hamiltonian,
             hamiltonian_map,
         };
@@ -272,6 +354,14 @@ impl Lattice {
 pub fn a_hamiltonian(lattice: &Lattice, hamiltonian_map: &Matrix<f64>, index: (i64, i64)) -> f64 {
     let site = &lattice.sites[lattice.sites.wrap(index)];
     let mut energy = -(site.magnetic_moment) * site.external_field;
+    assert!(
+        hamiltonian_map.n_rows % 2 == 1,
+        "hamiltonian map must have a center element"
+    );
+    assert!(
+        hamiltonian_map.n_cols % 2 == 1,
+        "hamiltonian map must have a center element"
+    );
     let offset = (
         (hamiltonian_map.n_cols / 2) as i64,
         (hamiltonian_map.n_rows / 2) as i64,
