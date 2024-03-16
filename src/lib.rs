@@ -1,7 +1,7 @@
 use std::ops::{Index, IndexMut};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 use std::thread;
-TODO: use RWLock on read-only goodies.
+//TODO: use RWLock on read-only goodies.
 use plotly::common::Title;
 use plotly::{HeatMap, ImageFormat, Layout, Plot};
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
@@ -147,7 +147,7 @@ pub struct Lattice {
     pub n_columns: usize,
     //TODO: make a second blitting sites matrix for the next state, though write
     //the code to expose only sites when done updating
-    pub sites: Matrix<LatticeSite>,
+    pub sites: Arc<RwLock<Matrix<LatticeSite>>>,
     scratch_sites: Matrix<Arc<Mutex<LatticeSite>>>,
     pub local_hamiltonian: fn(&Lattice, &Matrix<f64>, (i64, i64)) -> f64,
     pub hamiltonian_map: Matrix<f64>,
@@ -372,7 +372,7 @@ pub fn a_hamiltonian(lattice: &Lattice, hamiltonian_map: &Matrix<f64>, index: (i
             energy += -(site.magnetic_moment)
                 * hamiltonian_map[(i, j)]
                 * lattice.sites[lattice
-                    .sites
+                    .sites.read().unwrap()
                     .wrap((i as i64 + index.0 - offset.0, j as i64 + index.1 - offset.1))]
                 .magnetic_moment;
         }
