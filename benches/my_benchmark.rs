@@ -11,8 +11,10 @@ fn to_be_benched() {
     let mut lattice = Lattice::new(N_ROWS, N_COLUMNS, a_hamiltonian, hmap);
 
     let new_vec_temps = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.].repeat(lattice.n_rows);
-
-    for idx_t in 0..100 {
+    let max_iter = 100;
+    for idx_t in 0..max_iter {
+        let mut current_temp = 5.01 - (idx_t as f64 / (max_iter as f64) * 5.0);
+        lattice.set_temperature(current_temp);
         lattice.sequential_update();
         //lattice.update((1, 1))
     }
