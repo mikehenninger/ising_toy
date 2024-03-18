@@ -7,8 +7,8 @@ use std::thread::{self, JoinHandle};
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
 pub static DEFAULT_TEMPERATURE: f64 = 0.5;
 pub static DEFAULT_EXTERNAL_FIELD: f64 = 0.0;
-pub static N_ROWS: usize = 20;
-pub static N_COLUMNS: usize = 4;
+pub static N_ROWS: usize = 50;
+pub static N_COLUMNS: usize = 50;
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
@@ -111,6 +111,9 @@ where
     }
 }
 
+
+
+
 pub struct LatticeSite {
     pub magnetic_moment: f64,
     pub temperature: f64,
@@ -212,7 +215,7 @@ impl Lattice {
         }
     }
 
-    pub fn update_scratch(&mut self, (i, j): (i64, i64)) -> JoinHandle<()> {
+    fn update_scratch(&mut self, (i, j): (i64, i64)) -> JoinHandle<()> {
         let guarded_sites = Arc::clone(&self.sites);
         let the_ham = self.local_hamiltonian.clone();
         let the_map = self.hamiltonian_map.clone();
