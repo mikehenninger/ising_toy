@@ -8,12 +8,12 @@ fn to_be_benched() {
     hmap[(2, 0)] = 0.0;
     hmap[(2, 2)] = 0.0;
     hmap[(1, 1)] = 0.0;
-    let mut lattice = Lattice::new(N_ROWS, N_COLUMNS, a_hamiltonian, hmap);
+    let mut lattice = AlternateLattice::new(N_ROWS, N_COLUMNS, a_hamiltonian, hmap);
 
     let new_vec_temps = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.].repeat(lattice.n_rows);
 
-    for idx_t in 0..10 {
-        lattice.sequential_update();
+    for idx_t in 0..100 {
+        lattice.new_update();
         //lattice.update((1, 1))
     }
 }
