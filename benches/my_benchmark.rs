@@ -12,7 +12,7 @@ fn to_be_benched() {
 
     let new_vec_temps = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.].repeat(lattice.n_rows);
 
-    for idx_t in 0..100 {
+    for idx_t in 0..10 {
         lattice.sequential_update();
         //lattice.update((1, 1))
     }

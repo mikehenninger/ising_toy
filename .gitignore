@@ -1,2 +1,4 @@
 /target
 *.png
+# below is vtune directory
+/hello_rust(ising)
