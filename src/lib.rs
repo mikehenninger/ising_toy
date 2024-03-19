@@ -1,15 +1,22 @@
+// turn below off for final checking
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
+
 use plotly::common::Title;
 use plotly::{HeatMap, ImageFormat, Layout, Plot};
 
 use core::panic;
 use std::ops::{Index, IndexMut};
 use std::sync::{mpsc, Arc, Mutex, RwLock};
-use std::thread::{self, JoinHandle};
+use std::thread::{self, sleep, JoinHandle};
+use std::time::Duration;
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
 pub static DEFAULT_TEMPERATURE: f64 = 0.5;
 pub static DEFAULT_EXTERNAL_FIELD: f64 = 0.0;
-pub static N_ROWS: usize = 100;
-pub static N_COLUMNS: usize = 100;
+pub static N_ROWS: usize = 30;
+pub static N_COLUMNS: usize = 30;
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
@@ -112,27 +119,28 @@ where
     }
 }
 
-pub struct UpdateWorker {
+pub struct UpdateWorker<F: Clone + Send> {
     pub id: usize,
     pub thread: thread::JoinHandle<()>,
     pub moments: Arc<RwLock<Matrix<f64>>>,
     pub temperature: Arc<RwLock<Matrix<f64>>>,
     pub external_field: Arc<RwLock<Matrix<f64>>>,
-    hamiltonian: fn(&Matrix<f64>, &Matrix<f64>, &Matrix<f64>, (i64, i64)) -> f64,
-    hamiltonian_map: Matrix<f64>,
+    hamiltonian: F,
 }
-impl UpdateWorker {
+impl<F: Clone + Send> UpdateWorker<F> {
     pub fn new(
         id: usize,
         receiver: Arc<Mutex<mpsc::Receiver<UpdateLocation>>>,
         moments: Arc<RwLock<Matrix<f64>>>,
         temperature: Arc<RwLock<Matrix<f64>>>,
         external_field: Arc<RwLock<Matrix<f64>>>,
-        hamiltonian: fn(&Matrix<f64>, &Matrix<f64>, &Matrix<f64>, (i64, i64)) -> f64,
-        hamiltonian_map: Matrix<f64>,
-    ) -> UpdateWorker {
+        hamiltonian: F,
+    ) -> UpdateWorker<F>
+    where
+        F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'static,
+    {
         let ref_copy_hamiltonian = hamiltonian.clone();
-        let ref_copy_hamiltonian_map = hamiltonian_map.clone();
+
         let ref_copy_moments = Arc::clone(&moments);
         let ref_copy_temperature = Arc::clone(&temperature);
         let ref_copy_external_field = Arc::clone(&external_field);
@@ -149,8 +157,7 @@ impl UpdateWorker {
             let e_site = hamiltonian(
                 &read_moments,
                 &read_external_field,
-                &hamiltonian_map,
-                (update_loc.i, update_loc.j),
+                &(update_loc.i, update_loc.j),
             );
             let t_site = temperature.read().unwrap()[(ui, uj)];
             let p_state =
@@ -160,7 +167,7 @@ impl UpdateWorker {
 
             let r: f64 = rand::random();
             if r > p_state {
-                *update_loc.scratch_moment.lock().unwrap() = this_moment * -1.0;
+                *update_loc.scratch_moment.lock().unwrap() = -this_moment;
             } else {
                 *update_loc.scratch_moment.lock().unwrap() = this_moment;
             }
@@ -172,7 +179,6 @@ impl UpdateWorker {
             temperature: ref_copy_temperature,
             external_field: ref_copy_external_field,
             hamiltonian: ref_copy_hamiltonian,
-            hamiltonian_map: ref_copy_hamiltonian_map,
         }
     }
 }
@@ -195,7 +201,7 @@ impl Clone for UpdateLocation {
         }
     }
 }
-pub struct AlternateLattice {
+pub struct AlternateLattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send> {
     pub n_rows: usize,
     pub n_columns: usize,
     pub moments: Arc<RwLock<Matrix<f64>>>,
@@ -203,12 +209,15 @@ pub struct AlternateLattice {
     pub external_field: Arc<RwLock<Matrix<f64>>>,
     scratch_moments: Matrix<Arc<Mutex<f64>>>,
     pub sender: mpsc::SyncSender<UpdateLocation>,
-    pub thread_pool: Vec<UpdateWorker>,
-    pub local_hamiltonian: fn(&Matrix<f64>, &Matrix<f64>, &Matrix<f64>, (i64, i64)) -> f64,
-    pub hamiltonian_map: Matrix<f64>,
+    pub thread_pool: Vec<UpdateWorker<F>>,
+    // pub local_hamiltonian: fn(&Matrix<f64>, &Matrix<f64>, &Matrix<f64>, (i64, i64)) -> f64,
+    // pub hamiltonian_map: Matrix<f64>,
+    pub hamiltonian: F,
 }
 
-impl AlternateLattice {
+impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'static>
+    AlternateLattice<F>
+{
     pub fn set_temperature<T>(&mut self, temperature: T) -> ()
     where
         T: Broadcast,
@@ -262,8 +271,10 @@ impl AlternateLattice {
                 self.sender.send(update_loc).unwrap();
             }
         }
+        sleep(Duration::from_millis(50));
         self.copy_from_scratch()
     }
+
     pub fn sequential_update(&mut self) -> () {
         let mut handles = vec![];
         for i in 0..self.n_rows {
@@ -293,12 +304,7 @@ impl AlternateLattice {
         let actual_external_field = self.external_field.read().unwrap();
         let mut scratch_moment = self.scratch_moments[(ui, uj)].lock().unwrap();
 
-        let e_site = (self.local_hamiltonian)(
-            &actual_moments,
-            &actual_external_field,
-            &self.hamiltonian_map,
-            (i, j),
-        );
+        let e_site = (self.hamiltonian)(&actual_moments, &actual_external_field, &(i, j));
         let t_site = self.temperature.read().unwrap()[(ui, uj)];
         let p_state =
             (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
@@ -310,12 +316,10 @@ impl AlternateLattice {
             *scratch_moment = actual_moments[(ui, uj)];
         }
     }
-    pub fn new(
-        n_rows: usize,
-        n_columns: usize,
-        local_hamiltonian: fn(&Matrix<f64>, &Matrix<f64>, &Matrix<f64>, (i64, i64)) -> f64,
-        hamiltonian_map: Matrix<f64>,
-    ) -> AlternateLattice {
+    pub fn new(n_rows: usize, n_columns: usize, hamiltonian: F) -> AlternateLattice<F>
+    where
+        F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send,
+    {
         let mut moments_data: Vec<f64> = Vec::with_capacity(N_ROWS * N_COLUMNS);
         let mut scratch_moments: Vec<Arc<Mutex<f64>>> = Vec::with_capacity(N_ROWS * N_COLUMNS);
         let mut temperature_data: Vec<f64> = Vec::with_capacity(N_ROWS * N_COLUMNS);
@@ -344,17 +348,17 @@ impl AlternateLattice {
         )));
         let n_threads = 24;
         let mut workers = Vec::with_capacity(n_threads);
-        let (sender, receiver) = mpsc::sync_channel(12);
+        let (sender, receiver) = mpsc::sync_channel(0);
         let receiver = Arc::new(Mutex::new(receiver));
         for id in 0..n_threads {
+            let local_hamiltonian = hamiltonian.clone();
             workers.push(UpdateWorker::new(
                 id,
                 Arc::clone(&receiver),
                 Arc::clone(&moments),
                 Arc::clone(&temperature),
                 Arc::clone(&external_field),
-                local_hamiltonian.clone(),
-                hamiltonian_map.clone(),
+                local_hamiltonian,
             ));
         }
 
@@ -364,11 +368,10 @@ impl AlternateLattice {
             moments,
             temperature,
             external_field,
-            local_hamiltonian,
-            hamiltonian_map,
             scratch_moments: Matrix::new(N_ROWS, N_COLUMNS, scratch_moments),
             sender,
             thread_pool: workers,
+            hamiltonian,
         };
     }
     pub fn energy(&self) -> f64 {
@@ -377,11 +380,10 @@ impl AlternateLattice {
         let actual_external_field = self.external_field.read().unwrap();
         for i in 0..self.n_rows {
             for j in 0..self.n_columns {
-                energy += (self.local_hamiltonian)(
+                energy += (self.hamiltonian)(
                     &actual_moments,
                     &actual_external_field,
-                    &self.hamiltonian_map,
-                    (i as i64, j as i64),
+                    &(i as i64, j as i64),
                 );
             }
         }
@@ -419,28 +421,25 @@ impl AlternateLattice {
 /// `Lattice::energy()`
 /// * [Wikipedia](https://en.wikipedia.org/wiki/Ising_model)
 // TODO: probably make this one of an enum of hamiltonians
-pub fn a_hamiltonian(
-    moments: &Matrix<f64>,
-    external_field: &Matrix<f64>,
-    hamiltonian_map: &Matrix<f64>,
-    index: (i64, i64),
-) -> f64 {
-    let site_moment = &moments[moments.wrap(index)];
-    let mut energy = -(site_moment) * external_field[external_field.wrap(index)];
-    let offset = (
-        (hamiltonian_map.n_cols / 2) as i64,
-        (hamiltonian_map.n_rows / 2) as i64,
-    );
 
-    for i in 0..hamiltonian_map.n_rows {
-        for j in 0..hamiltonian_map.n_cols {
-            energy += -(site_moment)
-                * hamiltonian_map[(i, j)]
-                * moments
-                    [moments.wrap((i as i64 + index.0 - offset.0, j as i64 + index.1 - offset.1))];
+pub fn mapped_hamiltonian(
+    hamiltonian_map: &Matrix<f64>,
+) -> impl Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone {
+    let my_map = hamiltonian_map.clone();
+    return move |moments: &Matrix<f64>, external_field: &Matrix<f64>, index: &(i64, i64)| -> f64 {
+        let site_moment = &moments[moments.wrap(*index)];
+        let mut energy = -(site_moment) * external_field[external_field.wrap(*index)];
+        let offset = ((my_map.n_cols / 2) as i64, (my_map.n_rows / 2) as i64);
+        for i in 0..my_map.n_rows {
+            for j in 0..my_map.n_cols {
+                energy += -(site_moment)
+                    * my_map[(i, j)]
+                    * moments[moments
+                        .wrap((i as i64 + index.0 - offset.0, j as i64 + index.1 - offset.1))];
+            }
         }
-    }
-    return energy;
+        return energy;
+    };
 }
 
 pub fn row_edit<T: Clone>(mat: &mut Matrix<T>, row: usize, values: Vec<T>) -> () {

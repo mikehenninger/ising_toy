@@ -22,8 +22,11 @@ fn main() {
     hmap[(2, 0)] = 0.0;
     hmap[(2, 2)] = 0.0;
     hmap[(1, 1)] = 0.0;
-    let mut lattice = AlternateLattice::new(N_ROWS, N_COLUMNS, a_hamiltonian, hmap);
-    let new_vec_external_field = (-50..50)
+
+    let hamiltonian = mapped_hamiltonian(&hmap);
+    let mut lattice = AlternateLattice::new(N_ROWS, N_COLUMNS, hamiltonian);
+    let ffs = lattice.n_columns / 2;
+    let new_vec_external_field = (-(ffs as i64)..(ffs as i64))
         .map(|x| (x as f64) * 0.0)
         .collect::<Vec<f64>>()
         .repeat(lattice.n_rows);
@@ -37,12 +40,13 @@ fn main() {
     //lattice.sequential_update();
     lattice.set_external_field(new_ext_field.clone());
     lattice.set_temperature(new_temperature);
-    let max_iter = 1000;
+    let max_iter = 10;
     let mut mag_over_time: Vec<f64> = Vec::new();
     let mut temperature_over_time: Vec<f64> = Vec::new();
-    lattice.new_update();
+    lattice.sequential_update();
     for idx_t in 0..max_iter {
         let mut current_temp = 5.01 - (idx_t as f64 / (max_iter as f64) * 5.0);
+        //let current_temp = 0.5;
         lattice.set_temperature(current_temp);
         //println!("Energy: {}", lattice.energy());
         let current_mag = lattice.net_magnetization();
@@ -54,7 +58,7 @@ fn main() {
             lattice.moments_as_heatmap(format!("{idx_t}.png"), false);
             println!("Temperature: {}", current_temp);
         }
-        lattice.new_update();
+        lattice.sequential_update();
 
         //println!("Temperature: {}", current_temp);
     }
