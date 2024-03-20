@@ -15,8 +15,8 @@ use std::time::Duration;
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
 pub static DEFAULT_TEMPERATURE: f64 = 0.5;
 pub static DEFAULT_EXTERNAL_FIELD: f64 = 0.0;
-pub static N_ROWS: usize = 30;
-pub static N_COLUMNS: usize = 30;
+pub static N_ROWS: usize = 100;
+pub static N_COLUMNS: usize = 100;
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
@@ -144,34 +144,38 @@ impl<F: Clone + Send> UpdateWorker<F> {
         let ref_copy_moments = Arc::clone(&moments);
         let ref_copy_temperature = Arc::clone(&temperature);
         let ref_copy_external_field = Arc::clone(&external_field);
-        let thread = thread::spawn(move || loop {
-            let update_loc = match receiver.lock().unwrap().recv() {
-                Ok(update_loc) => update_loc,
-                Err(_) => break,
-            };
+        let thread = thread::Builder::new()
+            .spawn(move || loop {
+                let update_loc = match receiver.lock().unwrap().recv() {
+                    Ok(update_loc) => update_loc,
+                    Err(_) => break,
+                };
 
-            //println!("Worker {id} got a job; executing.");
-            let read_moments = moments.read().unwrap();
-            let read_external_field = external_field.read().unwrap();
-            let (ui, uj) = read_moments.wrap((update_loc.i, update_loc.j));
-            let e_site = hamiltonian(
-                &read_moments,
-                &read_external_field,
-                &(update_loc.i, update_loc.j),
-            );
-            let t_site = temperature.read().unwrap()[(ui, uj)];
-            let p_state =
-                (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
+                //println!("Worker {id} got a job; executing.");
+                let read_moments = moments.read().expect("Could not read moments");
+                let read_external_field = external_field
+                    .read()
+                    .expect("Could not read external field");
+                let (ui, uj) = read_moments.wrap((update_loc.i, update_loc.j));
+                let e_site = hamiltonian(
+                    &read_moments,
+                    &read_external_field,
+                    &(update_loc.i, update_loc.j),
+                );
+                let t_site = temperature.read().unwrap()[(ui, uj)];
+                let p_state =
+                    (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
 
-            let this_moment = read_moments[(ui, uj)];
+                let this_moment = read_moments[(ui, uj)];
 
-            let r: f64 = rand::random();
-            if r > p_state {
-                *update_loc.scratch_moment.lock().unwrap() = -this_moment;
-            } else {
-                *update_loc.scratch_moment.lock().unwrap() = this_moment;
-            }
-        });
+                let r: f64 = rand::random();
+                if r > p_state {
+                    *update_loc.scratch_moment.lock().unwrap() = -this_moment;
+                } else {
+                    *update_loc.scratch_moment.lock().unwrap() = this_moment;
+                }
+            })
+            .expect("Could not create thread");
         UpdateWorker {
             id,
             thread,
@@ -271,7 +275,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
                 self.sender.send(update_loc).unwrap();
             }
         }
-        sleep(Duration::from_millis(50));
+        //sleep(Duration::from_millis(50));
         self.copy_from_scratch()
     }
 
@@ -348,7 +352,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         )));
         let n_threads = 24;
         let mut workers = Vec::with_capacity(n_threads);
-        let (sender, receiver) = mpsc::sync_channel(0);
+        let (sender, receiver) = mpsc::sync_channel(24);
         let receiver = Arc::new(Mutex::new(receiver));
         for id in 0..n_threads {
             let local_hamiltonian = hamiltonian.clone();
