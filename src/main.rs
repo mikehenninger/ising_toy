@@ -15,6 +15,7 @@ use plotly::{HeatMap, ImageFormat, Layout, Plot};
 // also, n_cols vs n_columns
 
 fn main() {
+    
     let hsize: (usize, usize) = (3, 3);
     let mut hmap = Matrix::new(hsize.0, hsize.1, vec![1.0; hsize.0 * hsize.1]);
     hmap[(0, 0)] = 0.0;

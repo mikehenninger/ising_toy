@@ -125,54 +125,70 @@ pub struct UpdateWorker<F: Clone + Send> {
     pub moments: Arc<RwLock<Matrix<f64>>>,
     pub temperature: Arc<RwLock<Matrix<f64>>>,
     pub external_field: Arc<RwLock<Matrix<f64>>>,
+    pub scratch_region: Arc<Mutex<Vec<f64>>>,
+    pub scratch_offset: usize,
     hamiltonian: F,
 }
 impl<F: Clone + Send> UpdateWorker<F> {
     pub fn new(
         id: usize,
-        receiver: Arc<Mutex<mpsc::Receiver<UpdateLocation>>>,
+        receiver: Arc<Mutex<mpsc::Receiver<UpdateMessage>>>,
         moments: Arc<RwLock<Matrix<f64>>>,
         temperature: Arc<RwLock<Matrix<f64>>>,
         external_field: Arc<RwLock<Matrix<f64>>>,
+        scratch_region: Arc<Mutex<Vec<f64>>>,
+        scratch_offset: usize,
         hamiltonian: F,
     ) -> UpdateWorker<F>
     where
         F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'static,
     {
         let ref_copy_hamiltonian = hamiltonian.clone();
-
         let ref_copy_moments = Arc::clone(&moments);
         let ref_copy_temperature = Arc::clone(&temperature);
         let ref_copy_external_field = Arc::clone(&external_field);
+        let ref_copy_scratch_region = Arc::clone(&scratch_region);
         let thread = thread::Builder::new()
             .spawn(move || loop {
-                let update_loc = match receiver.lock().unwrap().recv() {
-                    Ok(update_loc) => update_loc,
+                let update_message = match receiver.lock().unwrap().recv() {
+                    Ok(update_message) => update_message,
                     Err(_) => break,
                 };
-
+                //let mut update_loc:Option<(i64,i64)> = Some((0, 0));
+                let mut update_loc = match update_message {
+                    UpdateMessage::Location(i, j) => vec![(i as i64, j as i64)],
+                    UpdateMessage::All => {
+                        println!("NEED CODE FOR `ALL` CASE");
+                        continue;
+                    }
+                    UpdateMessage::Stop => break, //kill the spawn loop and thus the thread
+                };
                 //println!("Worker {id} got a job; executing.");
-                let read_moments = moments.read().expect("Could not read moments");
-                let read_external_field = external_field
-                    .read()
-                    .expect("Could not read external field");
-                let (ui, uj) = read_moments.wrap((update_loc.i, update_loc.j));
-                let e_site = hamiltonian(
-                    &read_moments,
-                    &read_external_field,
-                    &(update_loc.i, update_loc.j),
-                );
-                let t_site = temperature.read().unwrap()[(ui, uj)];
-                let p_state =
-                    (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
+                {
+                    // mutex locked scope
+                    let mut scratch_region_locked =
+                        scratch_region.lock().expect("couldn't lock scratch region");
+                    for (i, j) in update_loc {
+                        let read_moments = moments.read().expect("Could not read moments");
+                        let read_external_field = external_field
+                            .read()
+                            .expect("Could not read external field");
+                        let (ui, uj) = read_moments.wrap((i, j));
+                        let offset_linear_loc = ui * read_moments.n_cols + uj - scratch_offset;
+                        let e_site = hamiltonian(&read_moments, &read_external_field, &update_loc);
+                        let t_site = temperature.read().unwrap()[(ui, uj)];
+                        let p_state = (-e_site / t_site).exp()
+                            / ((-e_site / t_site).exp() + (e_site / t_site).exp());
 
-                let this_moment = read_moments[(ui, uj)];
+                        let this_moment = read_moments[(ui, uj)];
 
-                let r: f64 = rand::random();
-                if r > p_state {
-                    *update_loc.scratch_moment.lock().unwrap() = -this_moment;
-                } else {
-                    *update_loc.scratch_moment.lock().unwrap() = this_moment;
+                        let r: f64 = rand::random();
+                        if r > p_state {
+                            scratch_region_locked[offset_linear_loc] = -this_moment;
+                        } else {
+                            scratch_region_locked[offset_linear_loc] = this_moment;
+                        }
+                    }
                 }
             })
             .expect("Could not create thread");
@@ -183,36 +199,38 @@ impl<F: Clone + Send> UpdateWorker<F> {
             temperature: ref_copy_temperature,
             external_field: ref_copy_external_field,
             hamiltonian: ref_copy_hamiltonian,
+            scratch_region,
+            scratch_offset,
         }
     }
 }
 //type Job = Box<dyn FnOnce() + Send + 'static>;
-pub struct UpdateLocation {
-    pub i: i64,
-    pub j: i64,
-    pub scratch_moment: Arc<Mutex<f64>>,
+pub enum UpdateMessage {
+    Location(usize, usize),
+    All,
+    Stop,
 }
 
-impl Clone for UpdateLocation {
-    fn clone(&self) -> UpdateLocation {
-        let i = self.i;
-        let j = self.j;
-        let scratch_moment = Arc::clone(&self.scratch_moment);
-        UpdateLocation {
-            i,
-            j,
-            scratch_moment,
-        }
-    }
-}
+// impl Clone for UpdateLocation {
+//     fn clone(&self) -> UpdateLocation {
+//         let i = self.i;
+//         let j = self.j;
+//         let scratch_moment = Arc::clone(&self.scratch_moment);
+//         UpdateLocation {
+//             i,
+//             j,
+//             scratch_moment,
+//         }
+//     }
+// }
 pub struct AlternateLattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send> {
     pub n_rows: usize,
     pub n_columns: usize,
     pub moments: Arc<RwLock<Matrix<f64>>>,
     pub temperature: Arc<RwLock<Matrix<f64>>>,
     pub external_field: Arc<RwLock<Matrix<f64>>>,
-    scratch_moments: Matrix<Arc<Mutex<f64>>>,
-    pub sender: mpsc::SyncSender<UpdateLocation>,
+    scratch_moments: Vec<Arc<Mutex<Vec<f64>>>>,
+    pub sender: mpsc::SyncSender<UpdateMessage>,
     pub thread_pool: Vec<UpdateWorker<F>>,
     // pub local_hamiltonian: fn(&Matrix<f64>, &Matrix<f64>, &Matrix<f64>, (i64, i64)) -> f64,
     // pub hamiltonian_map: Matrix<f64>,
@@ -325,7 +343,6 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send,
     {
         let mut moments_data: Vec<f64> = Vec::with_capacity(N_ROWS * N_COLUMNS);
-        let mut scratch_moments: Vec<Arc<Mutex<f64>>> = Vec::with_capacity(N_ROWS * N_COLUMNS);
         let mut temperature_data: Vec<f64> = Vec::with_capacity(N_ROWS * N_COLUMNS);
         let mut external_field_data: Vec<f64> = Vec::with_capacity(N_ROWS * N_COLUMNS);
         for _ in 0..N_COLUMNS * N_ROWS {
@@ -335,7 +352,6 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             } else {
                 moments_data.push(DEFAULT_MAGNETIC_MOMENT);
             }
-            scratch_moments.push(Arc::new(Mutex::new(0.0)));
             temperature_data.push(DEFAULT_TEMPERATURE);
             external_field_data.push(DEFAULT_EXTERNAL_FIELD);
         }
@@ -351,8 +367,13 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             external_field_data,
         )));
         let n_threads = 24;
+        let mut thread_chunk_sizes = vec![(N_ROWS * N_COLUMNS) / (n_threads - 1), n_threads - 1];
+        thread_chunk_sizes.push((N_ROWS * N_COLUMNS) % (n_threads - 1));
+        let mut scratch_moments: Vec<Arc<Mutex<Vec<f64>>>> =
+            Vec::with_capacity(thread_chunk_sizes.len());
+
         let mut workers = Vec::with_capacity(n_threads);
-        let (sender, receiver) = mpsc::sync_channel(24);
+        let (sender, receiver) = mpsc::sync_channel(n_threads);
         let receiver = Arc::new(Mutex::new(receiver));
         for id in 0..n_threads {
             let local_hamiltonian = hamiltonian.clone();
@@ -362,6 +383,8 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
                 Arc::clone(&moments),
                 Arc::clone(&temperature),
                 Arc::clone(&external_field),
+                scratch_moments[id],
+                id * thread_chunk_sizes[0],
                 local_hamiltonian,
             ));
         }
