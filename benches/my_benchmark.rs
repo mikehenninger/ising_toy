@@ -8,7 +8,8 @@ fn to_be_benched() {
     hmap[(2, 0)] = 0.0;
     hmap[(2, 2)] = 0.0;
     hmap[(1, 1)] = 0.0;
-    let mut lattice = AlternateLattice::new(N_ROWS, N_COLUMNS, a_hamiltonian, hmap);
+    let hamiltonian = mapped_hamiltonian(&hmap);
+    let mut lattice = AlternateLattice::new(N_ROWS, N_COLUMNS, hamiltonian);
 
     let new_vec_temps = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.].repeat(lattice.n_rows);
 
