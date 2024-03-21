@@ -15,8 +15,8 @@ use std::time::Duration;
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
 pub static DEFAULT_TEMPERATURE: f64 = 0.5;
 pub static DEFAULT_EXTERNAL_FIELD: f64 = 0.0;
-pub static N_ROWS: usize = 100;
-pub static N_COLUMNS: usize = 100;
+pub static N_ROWS: usize = 10;
+pub static N_COLUMNS: usize = 10;
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
@@ -154,7 +154,6 @@ impl<F: Clone + Send> UpdateWorker<F> {
                     Ok(update_message) => update_message,
                     Err(_) => break,
                 };
-                //let mut update_loc:Option<(i64,i64)> = Some((0, 0));
                 let mut update_loc = match update_message {
                     UpdateMessage::Location(i, j) => vec![(i as i64, j as i64)],
                     UpdateMessage::All => {
@@ -169,13 +168,14 @@ impl<F: Clone + Send> UpdateWorker<F> {
                     let mut scratch_region_locked =
                         scratch_region.lock().expect("couldn't lock scratch region");
                     for (i, j) in update_loc {
+                        println!("Worker {id} is updating ({i}, {j})");
                         let read_moments = moments.read().expect("Could not read moments");
                         let read_external_field = external_field
                             .read()
                             .expect("Could not read external field");
                         let (ui, uj) = read_moments.wrap((i, j));
                         let offset_linear_loc = ui * read_moments.n_cols + uj - scratch_offset;
-                        let e_site = hamiltonian(&read_moments, &read_external_field, &update_loc);
+                        let e_site = hamiltonian(&read_moments, &read_external_field, &(i, j));
                         let t_site = temperature.read().unwrap()[(ui, uj)];
                         let p_state = (-e_site / t_site).exp()
                             / ((-e_site / t_site).exp() + (e_site / t_site).exp());
@@ -199,8 +199,8 @@ impl<F: Clone + Send> UpdateWorker<F> {
             temperature: ref_copy_temperature,
             external_field: ref_copy_external_field,
             hamiltonian: ref_copy_hamiltonian,
-            scratch_region,
-            scratch_offset,
+            scratch_region: ref_copy_scratch_region,
+            scratch_offset, //survives all the way to here via copy
         }
     }
 }
@@ -284,12 +284,10 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         // `loop` closures will never be idle so can't check that, right?
         for i in 0..self.n_rows {
             for j in 0..self.n_columns {
-                let scratch_moment = Arc::clone(&self.scratch_moments[(i, j)]);
-                let update_loc = UpdateLocation {
-                    i: i as i64,
-                    j: j as i64,
-                    scratch_moment,
-                };
+                XXX need to rework the channels to be one per thread and dispatch these updates correctly
+                or have the message broadcast to all threads and then the threads decide if they should act on it
+                but "mpmc" is not a thing in std:sync
+                let update_loc = UpdateMessage::Location(i, j);
                 self.sender.send(update_loc).unwrap();
             }
         }
@@ -297,47 +295,52 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         self.copy_from_scratch()
     }
 
-    pub fn sequential_update(&mut self) -> () {
-        let mut handles = vec![];
-        for i in 0..self.n_rows {
-            for j in 0..self.n_columns {
-                let handle = self.update((i as i64, j as i64));
-                handles.push(handle);
-            }
-        }
-        // for handle in handles {
-        //     handle.join().unwrap();
-        // }
+    // pub fn sequential_update(&mut self) -> () {
+    //     let mut handles = vec![];
+    //     for i in 0..self.n_rows {
+    //         for j in 0..self.n_columns {
+    //             let handle = self.update((i as i64, j as i64));
+    //             handles.push(handle);
+    //         }
+    //     }
+    //     // for handle in handles {
+    //     //     handle.join().unwrap();
+    //     // }
 
-        self.copy_from_scratch();
-    }
+    //     self.copy_from_scratch();
+    // }
     fn copy_from_scratch(&mut self) -> () {
         let mut actual_moments = self.moments.write().unwrap();
-        for i in 0..self.n_rows {
-            for j in 0..self.n_columns {
-                actual_moments[(i, j)] = *self.scratch_moments[(i, j)].lock().unwrap();
+
+        for idx_thread in 0..self.thread_pool.len() {
+            let scratch_moments = self.scratch_moments[idx_thread].lock().unwrap();
+            let scratch_offset = self.thread_pool[idx_thread].scratch_offset;
+            for scratch_loc in 0..scratch_moments.len() {
+                let absolute_loc = scratch_loc + scratch_offset;
+                let (ui, uj) = (absolute_loc / self.n_columns, absolute_loc % self.n_columns);
+                actual_moments[(ui, uj)] = scratch_moments[scratch_loc];
             }
         }
     }
 
-    pub fn update(&mut self, (i, j): (i64, i64)) -> () {
-        let actual_moments = self.moments.read().unwrap();
-        let (ui, uj) = actual_moments.wrap((i, j)).clone();
-        let actual_external_field = self.external_field.read().unwrap();
-        let mut scratch_moment = self.scratch_moments[(ui, uj)].lock().unwrap();
+    // pub fn update(&mut self, (i, j): (i64, i64)) -> () {
+    //     let actual_moments = self.moments.read().unwrap();
+    //     let (ui, uj) = actual_moments.wrap((i, j)).clone();
+    //     let actual_external_field = self.external_field.read().unwrap();
+    //     let mut scratch_moment = self.scratch_moments[(ui, uj)].lock().unwrap();
 
-        let e_site = (self.hamiltonian)(&actual_moments, &actual_external_field, &(i, j));
-        let t_site = self.temperature.read().unwrap()[(ui, uj)];
-        let p_state =
-            (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
-        let r: f64 = rand::random();
+    //     let e_site = (self.hamiltonian)(&actual_moments, &actual_external_field, &(i, j));
+    //     let t_site = self.temperature.read().unwrap()[(ui, uj)];
+    //     let p_state =
+    //         (-e_site / t_site).exp() / ((-e_site / t_site).exp() + (e_site / t_site).exp());
+    //     let r: f64 = rand::random();
 
-        if r > p_state {
-            *scratch_moment = -1.0 * actual_moments[(ui, uj)];
-        } else {
-            *scratch_moment = actual_moments[(ui, uj)];
-        }
-    }
+    //     if r > p_state {
+    //         *scratch_moment = -1.0 * actual_moments[(ui, uj)];
+    //     } else {
+    //         *scratch_moment = actual_moments[(ui, uj)];
+    //     }
+    // }
     pub fn new(n_rows: usize, n_columns: usize, hamiltonian: F) -> AlternateLattice<F>
     where
         F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send,
@@ -366,11 +369,30 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             N_COLUMNS,
             external_field_data,
         )));
-        let n_threads = 24;
-        let mut thread_chunk_sizes = vec![(N_ROWS * N_COLUMNS) / (n_threads - 1), n_threads - 1];
-        thread_chunk_sizes.push((N_ROWS * N_COLUMNS) % (n_threads - 1));
+        let n_threads = 2;
+
+        let mut thread_chunk_sizes = vec![N_ROWS * N_COLUMNS];
+
+        if n_threads > 1 {
+            let is_multiple = (N_ROWS * N_COLUMNS) % (n_threads) == 0;
+            if is_multiple {
+                thread_chunk_sizes = vec![(N_ROWS * N_COLUMNS) / n_threads; n_threads];
+            } else {
+                thread_chunk_sizes = vec![(N_ROWS * N_COLUMNS) / (n_threads - 1); n_threads - 1];
+                thread_chunk_sizes.push((N_ROWS * N_COLUMNS) % (n_threads - 1));
+            }
+        }
+
         let mut scratch_moments: Vec<Arc<Mutex<Vec<f64>>>> =
             Vec::with_capacity(thread_chunk_sizes.len());
+
+        for idx_chunk in 0..thread_chunk_sizes.len() {
+            let mut scratch_moment = Vec::with_capacity(thread_chunk_sizes[idx_chunk]);
+            for _ in 0..thread_chunk_sizes[idx_chunk] {
+                scratch_moment.push(0.0);
+            }
+            scratch_moments.push(Arc::new(Mutex::new(scratch_moment)));
+        }
 
         let mut workers = Vec::with_capacity(n_threads);
         let (sender, receiver) = mpsc::sync_channel(n_threads);
@@ -383,8 +405,8 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
                 Arc::clone(&moments),
                 Arc::clone(&temperature),
                 Arc::clone(&external_field),
-                scratch_moments[id],
-                id * thread_chunk_sizes[0],
+                Arc::clone(&scratch_moments[id]),
+                id * thread_chunk_sizes[0], //correct even if last chunk is smaller
                 local_hamiltonian,
             ));
         }
@@ -395,7 +417,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             moments,
             temperature,
             external_field,
-            scratch_moments: Matrix::new(N_ROWS, N_COLUMNS, scratch_moments),
+            scratch_moments,
             sender,
             thread_pool: workers,
             hamiltonian,
