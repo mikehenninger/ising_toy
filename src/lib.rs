@@ -45,13 +45,13 @@ impl Broadcast for f64 {
 impl Broadcast for Matrix<f64> {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64> {
         assert_eq!(self.n_rows, shape.0);
-        assert_eq!(self.n_cols, shape.1);
+        assert_eq!(self.n_columns, shape.1);
         return self.clone();
     }
 }
 pub struct Matrix<T: Clone> {
     pub n_rows: usize,
-    pub n_cols: usize,
+    pub n_columns: usize,
     pub data: Vec<T>,
 }
 
@@ -61,7 +61,7 @@ impl<T: Clone> Matrix<T> {
         for i in 0..self.n_rows {
             //TODO: VECTORIZE THIS
             let mut row = Vec::new();
-            for j in 0..self.n_cols {
+            for j in 0..self.n_columns {
                 row.push((*self.index((i, j))).clone());
             }
             vec_vec.push(row);
@@ -76,7 +76,7 @@ impl<T: Clone> Matrix<T> {
         );
         Self {
             n_rows,
-            n_cols,
+            n_columns: n_cols,
             data,
         }
     }
@@ -88,10 +88,10 @@ impl<T: Clone> Matrix<T> {
             i += self.n_rows as i64;
         }
         while j < 0 {
-            j += self.n_cols as i64;
+            j += self.n_columns as i64;
         }
         i = i % self.n_rows as i64;
-        j = j % self.n_cols as i64;
+        j = j % self.n_columns as i64;
         (i as usize, j as usize)
     }
 }
@@ -101,10 +101,10 @@ impl<T: Clone> Index<(usize, usize)> for Matrix<T> {
 
     fn index(&self, index: (usize, usize)) -> &Self::Output {
         assert!(
-            index.0 < self.n_rows && index.1 < self.n_cols,
+            index.0 < self.n_rows && index.1 < self.n_columns,
             "Index out of bounds"
         );
-        &self.data[index.0 * self.n_cols + index.1]
+        &self.data[index.0 * self.n_columns + index.1]
     }
 }
 
@@ -113,10 +113,10 @@ impl<T: Clone> IndexMut<(usize, usize)> for Matrix<T> {
 
     fn index_mut(&mut self, index: (usize, usize)) -> &mut Self::Output {
         assert!(
-            index.0 < self.n_rows && index.1 < self.n_cols,
+            index.0 < self.n_rows && index.1 < self.n_columns,
             "Index out of bounds"
         );
-        &mut self.data[index.0 * self.n_cols + index.1]
+        &mut self.data[index.0 * self.n_columns + index.1]
     }
 }
 
@@ -127,7 +127,7 @@ where
     fn clone(&self) -> Matrix<T> {
         Matrix {
             n_rows: self.n_rows,
-            n_cols: self.n_cols,
+            n_columns: self.n_columns,
             data: self.data.clone(),
         }
     }
@@ -187,8 +187,8 @@ impl<F: Clone + Send> UpdateWorker<F> {
                             scratch_offset..(scratch_offset + scratch_region.lock().unwrap().len())
                         {
                             all_locs.push((
-                                (idx_absolute / read_moments.n_cols) as i64,
-                                (idx_absolute % read_moments.n_cols) as i64,
+                                (idx_absolute / read_moments.n_columns) as i64,
+                                (idx_absolute % read_moments.n_columns) as i64,
                             ));
                         }
                         all_locs
@@ -199,6 +199,21 @@ impl<F: Clone + Send> UpdateWorker<F> {
                         scratch_barrier.wait();
                         continue;
                     }
+                    UpdateMessage::UpdateN(n) => {
+                        let mut rng = rand::thread_rng();
+                        let mut all_locs = Vec::new();
+
+                        for i in 0..n {
+                            let local_offset = rng.gen_range(0..scratch_len);
+
+                            let (ui, uj) = linear_to_matrix_index(
+                                local_offset + scratch_offset,
+                                &(read_moments.n_columns, read_moments.n_rows),
+                            );
+                            all_locs.push((ui as i64, uj as i64));
+                        }
+                        all_locs
+                    }
                 };
 
                 {
@@ -208,7 +223,7 @@ impl<F: Clone + Send> UpdateWorker<F> {
                     for (i, j) in update_loc {
                         let (ui, uj) = read_moments.wrap((i, j));
 
-                        let offset_linear_loc = ui * read_moments.n_cols + uj - scratch_offset;
+                        let offset_linear_loc = ui * read_moments.n_columns + uj - scratch_offset;
 
                         let e_site = hamiltonian(&read_moments, &read_external_field, &(i, j));
                         let t_site = temperature.read().unwrap()[(ui, uj)];
@@ -249,6 +264,7 @@ pub enum UpdateMessage {
     All,
     Ignore,
     Stop,
+    UpdateN(usize),
 }
 
 // impl Clone for UpdateLocation {
@@ -337,22 +353,15 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         for worker in self.thread_pool.iter() {
             worker.sender.send(UpdateMessage::All).unwrap();
         }
-        //sleep(Duration::from_millis(5));
         self.copy_from_scratch();
     }
 
-    pub fn update_one_per_thread_random(&mut self) -> () {
+    pub fn update_n_per_thread_random(&mut self, n: usize) -> () {
         //if the last thread has fewer sites, those sites will be updated more frequently
         //so not ideal, statistically.
-        let mut rng = rand::thread_rng();
 
         for worker in self.thread_pool.iter() {
-            let local_offset = rng.gen_range(0..worker.scratch_len);
-            let (ui, uj) = linear_to_matrix_index(
-                local_offset + worker.scratch_offset,
-                &(self.n_columns, self.n_rows),
-            );
-            worker.sender.send(UpdateMessage::Location(ui, uj)).unwrap();
+            worker.sender.send(UpdateMessage::UpdateN(n)).unwrap();
         }
         self.can_wait_scratch_barrier = true;
         self.copy_from_scratch();
@@ -542,11 +551,11 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
 
         let mut plot = Plot::new();
         let title = Title::new("Magnetic Moments");
-        let layout = Layout::new().title(title).width(800).height(800);
+        let layout = Layout::new().title(title).width(2000).height(2000);
         plot.add_trace(trace);
         plot.set_layout(layout);
 
-        plot.write_image(filename, ImageFormat::PNG, 800, 600, 1.0);
+        plot.write_image(filename, ImageFormat::PNG, 1600, 1600, 1.0);
         if to_screen {
             plot.show();
         }
@@ -567,9 +576,9 @@ pub fn mapped_hamiltonian(
     return move |moments: &Matrix<f64>, external_field: &Matrix<f64>, index: &(i64, i64)| -> f64 {
         let site_moment = &moments[moments.wrap(*index)];
         let mut energy = -(site_moment) * external_field[external_field.wrap(*index)];
-        let offset = ((my_map.n_cols / 2) as i64, (my_map.n_rows / 2) as i64);
+        let offset = ((my_map.n_columns / 2) as i64, (my_map.n_rows / 2) as i64);
         for i in 0..my_map.n_rows {
-            for j in 0..my_map.n_cols {
+            for j in 0..my_map.n_columns {
                 energy += -(site_moment)
                     * my_map[(i, j)]
                     * moments[moments
@@ -581,14 +590,14 @@ pub fn mapped_hamiltonian(
 }
 
 pub fn row_edit<T: Clone>(mat: &mut Matrix<T>, row: usize, values: Vec<T>) -> () {
-    for i in 0..mat.n_cols {
-        mat.data[row * mat.n_cols + i] = values[i].clone();
+    for i in 0..mat.n_columns {
+        mat.data[row * mat.n_columns + i] = values[i].clone();
     }
 }
 
 pub fn column_edit<T: Clone>(mat: &mut Matrix<T>, column: usize, values: Vec<T>) -> () {
     for i in 0..mat.n_rows {
-        mat.data[i * mat.n_cols + column] = values[i].clone();
+        mat.data[i * mat.n_columns + column] = values[i].clone();
     }
 }
 
@@ -619,19 +628,19 @@ mod tests {
         let a: f64 = 1.0;
         let b: Matrix<f64> = a.broadcast(shape);
         let c: Matrix<f64> = Matrix::new(shape.0, shape.1, vec![1.0; 4]);
-        let d: Matrix<f64> = c.broadcast((b.n_rows, b.n_cols));
+        let d: Matrix<f64> = c.broadcast((b.n_rows, b.n_columns));
         assert_eq!(b.data, vec![1.0; 4]);
         assert_eq!(c.data, vec![1.0; 4]);
         assert_eq!(d.data, vec![1.0; 4]);
         assert_eq!(b.n_rows, shape.0);
-        assert_eq!(b.n_cols, shape.1);
+        assert_eq!(b.n_columns, shape.1);
     }
 
     #[test]
     fn test_matrix_creation() {
         let matrix = Matrix::new(2, 3, vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(matrix.n_rows, 2);
-        assert_eq!(matrix.n_cols, 3);
+        assert_eq!(matrix.n_columns, 3);
         assert_eq!(matrix.data, vec![1, 2, 3, 4, 5, 6]);
     }
 
