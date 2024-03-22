@@ -40,12 +40,12 @@ fn main() {
     //lattice.sequential_update();
     lattice.set_external_field(new_ext_field.clone());
     lattice.set_temperature(new_temperature);
-    let max_iter = 50;
+    let max_iter = 150;
     let mut mag_over_time: Vec<f64> = Vec::new();
     let mut temperature_over_time: Vec<f64> = Vec::new();
     lattice.full_update();
     for idx_t in 0..max_iter {
-        let mut current_temp = 5.01 - (idx_t as f64 / (max_iter as f64) * 5.0);
+        let mut current_temp = 2.01 - (idx_t as f64 / (max_iter as f64) * 2.0);
         //let current_temp = 0.5;
         lattice.set_temperature(current_temp);
         //println!("Energy: {}", lattice.energy());
@@ -54,10 +54,10 @@ fn main() {
         mag_over_time.push(current_mag);
 
         temperature_over_time.push(current_temp);
-        // if idx_t % (max_iter / 10) as i32 == 0 {
-        //     lattice.moments_as_heatmap(format!("{idx_t}.png"), false);
-        //     println!("Temperature: {}", current_temp);
-        // }
+        if idx_t % (max_iter / 10) as i32 == 0 {
+            lattice.moments_as_heatmap(format!("{idx_t}.png"), false);
+            println!("Temperature: {}", current_temp);
+        }
         lattice.full_update();
 
         //println!("Temperature: {}", current_temp);

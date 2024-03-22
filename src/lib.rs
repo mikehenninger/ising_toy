@@ -303,7 +303,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         for worker in self.thread_pool.iter() {
             worker.sender.send(UpdateMessage::All).unwrap();
         }
-        //sleep(Duration::from_millis(5));
+        sleep(Duration::from_millis(5));
         self.copy_from_scratch();
     }
 
