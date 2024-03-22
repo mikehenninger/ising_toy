@@ -15,8 +15,8 @@ use std::time::Duration;
 pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
 pub static DEFAULT_TEMPERATURE: f64 = 0.5;
 pub static DEFAULT_EXTERNAL_FIELD: f64 = 0.0;
-pub static N_ROWS: usize = 10;
-pub static N_COLUMNS: usize = 10;
+pub static N_ROWS: usize = 1000;
+pub static N_COLUMNS: usize = 500;
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
@@ -127,12 +127,14 @@ pub struct UpdateWorker<F: Clone + Send> {
     pub external_field: Arc<RwLock<Matrix<f64>>>,
     pub scratch_region: Arc<Mutex<Vec<f64>>>,
     pub scratch_offset: usize,
+    sender: mpsc::SyncSender<UpdateMessage>,
     hamiltonian: F,
 }
 impl<F: Clone + Send> UpdateWorker<F> {
     pub fn new(
         id: usize,
-        receiver: Arc<Mutex<mpsc::Receiver<UpdateMessage>>>,
+        sender: mpsc::SyncSender<UpdateMessage>, //NOT moved into the thread
+        receiver: mpsc::Receiver<UpdateMessage>,
         moments: Arc<RwLock<Matrix<f64>>>,
         temperature: Arc<RwLock<Matrix<f64>>>,
         external_field: Arc<RwLock<Matrix<f64>>>,
@@ -150,33 +152,51 @@ impl<F: Clone + Send> UpdateWorker<F> {
         let ref_copy_scratch_region = Arc::clone(&scratch_region);
         let thread = thread::Builder::new()
             .spawn(move || loop {
-                let update_message = match receiver.lock().unwrap().recv() {
+                let update_message = match receiver.recv() {
                     Ok(update_message) => update_message,
                     Err(_) => break,
                 };
+                let read_moments = moments.read().expect("Could not read moments");
+                //println!("Worker {id} has read lock on moments");
+                let read_external_field = external_field
+                    .read()
+                    .expect("Could not read external field");
+
                 let mut update_loc = match update_message {
                     UpdateMessage::Location(i, j) => vec![(i as i64, j as i64)],
                     UpdateMessage::All => {
-                        println!("NEED CODE FOR `ALL` CASE");
-                        continue;
+                        let mut all_locs = Vec::new();
+                        for idx_absolute in
+                            scratch_offset..(scratch_offset + scratch_region.lock().unwrap().len())
+                        {
+                            all_locs.push((
+                                (idx_absolute / read_moments.n_cols) as i64,
+                                (idx_absolute % read_moments.n_cols) as i64,
+                            ));
+                        }
+                        all_locs
                     }
                     UpdateMessage::Stop => break, //kill the spawn loop and thus the thread
                 };
                 //println!("Worker {id} got a job; executing.");
                 {
                     // mutex locked scope
+                    //println!("Worker {id} about to acquire mutex on its scratch region");
                     let mut scratch_region_locked =
                         scratch_region.lock().expect("couldn't lock scratch region");
+                    //println!("Worker {id} has locked mutex on its scratch region");
                     for (i, j) in update_loc {
-                        println!("Worker {id} is updating ({i}, {j})");
-                        let read_moments = moments.read().expect("Could not read moments");
-                        let read_external_field = external_field
-                            .read()
-                            .expect("Could not read external field");
+                        //println!("Worker {id} has read lock on external field");
                         let (ui, uj) = read_moments.wrap((i, j));
+                        //println!("Worker {id} is updating ({i}, {j})/({ui}, {uj})");
+
+                        //The error is here with scratch_offset being larger and trying to make usize negative
+
                         let offset_linear_loc = ui * read_moments.n_cols + uj - scratch_offset;
+
                         let e_site = hamiltonian(&read_moments, &read_external_field, &(i, j));
                         let t_site = temperature.read().unwrap()[(ui, uj)];
+                        //println!("Worker {id} got and released lock on temperature");
                         let p_state = (-e_site / t_site).exp()
                             / ((-e_site / t_site).exp() + (e_site / t_site).exp());
 
@@ -194,6 +214,7 @@ impl<F: Clone + Send> UpdateWorker<F> {
             .expect("Could not create thread");
         UpdateWorker {
             id,
+            sender,
             thread,
             moments: ref_copy_moments,
             temperature: ref_copy_temperature,
@@ -230,7 +251,7 @@ pub struct AlternateLattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f6
     pub temperature: Arc<RwLock<Matrix<f64>>>,
     pub external_field: Arc<RwLock<Matrix<f64>>>,
     scratch_moments: Vec<Arc<Mutex<Vec<f64>>>>,
-    pub sender: mpsc::SyncSender<UpdateMessage>,
+    //pub sender: mpsc::SyncSender<UpdateMessage>,
     pub thread_pool: Vec<UpdateWorker<F>>,
     // pub local_hamiltonian: fn(&Matrix<f64>, &Matrix<f64>, &Matrix<f64>, (i64, i64)) -> f64,
     // pub hamiltonian_map: Matrix<f64>,
@@ -277,22 +298,44 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         }
         vec_vec
     }
-    pub fn new_update(&mut self) -> () {
+
+    pub fn full_update(&mut self) -> () {
+        for worker in self.thread_pool.iter() {
+            worker.sender.send(UpdateMessage::All).unwrap();
+        }
+        //sleep(Duration::from_millis(5));
+        self.copy_from_scratch();
+    }
+
+    pub fn incremental_update(&mut self) -> () {
         //XXX TODO: needs to be synchronized before self.copy_from_scratch()
         //??? channels back to the main thread, saying when done?
         //shared bool array of "done"s, one for each thread?
         // `loop` closures will never be idle so can't check that, right?
+        let offset_list =
+            (self.thread_pool.iter().map(|x| x.scratch_offset)).collect::<Vec<usize>>();
+        let mut idx_linear: usize;
+        let mut idx_thread: usize;
         for i in 0..self.n_rows {
             for j in 0..self.n_columns {
-                XXX need to rework the channels to be one per thread and dispatch these updates correctly
-                or have the message broadcast to all threads and then the threads decide if they should act on it
-                but "mpmc" is not a thing in std:sync
+                idx_linear = i * self.n_columns + j;
+
+                idx_thread = find_slot_index(&offset_list, &idx_linear);
+                //println!("Sending ({i}, {j}) to thread {idx_thread}");
                 let update_loc = UpdateMessage::Location(i, j);
-                self.sender.send(update_loc).unwrap();
+                self.thread_pool[idx_thread]
+                    .sender
+                    .send(update_loc)
+                    .unwrap();
             }
         }
-        //sleep(Duration::from_millis(50));
-        self.copy_from_scratch()
+        // XXX THIS NEEDS A REAL SYNC
+        //without this, it deadlocks between threads and copy_from_scratch
+        //which I don't understand... a race, sure, but a deadlock???
+        sleep(Duration::from_millis(5));
+        //println!("All threads have been sent their updates; copying from scratch");
+        self.copy_from_scratch();
+        //println!("Done copying from scratch");
     }
 
     // pub fn sequential_update(&mut self) -> () {
@@ -310,6 +353,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
     //     self.copy_from_scratch();
     // }
     fn copy_from_scratch(&mut self) -> () {
+        //println!("Copying from scratch acquiring moments moments");
         let mut actual_moments = self.moments.write().unwrap();
 
         for idx_thread in 0..self.thread_pool.len() {
@@ -321,6 +365,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
                 actual_moments[(ui, uj)] = scratch_moments[scratch_loc];
             }
         }
+        //println!("Copying from scratch releasing moments moments");
     }
 
     // pub fn update(&mut self, (i, j): (i64, i64)) -> () {
@@ -369,7 +414,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             N_COLUMNS,
             external_field_data,
         )));
-        let n_threads = 2;
+        let n_threads = 24;
 
         let mut thread_chunk_sizes = vec![N_ROWS * N_COLUMNS];
 
@@ -395,13 +440,15 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         }
 
         let mut workers = Vec::with_capacity(n_threads);
-        let (sender, receiver) = mpsc::sync_channel(n_threads);
-        let receiver = Arc::new(Mutex::new(receiver));
+
         for id in 0..n_threads {
             let local_hamiltonian = hamiltonian.clone();
+            let (sender, receiver) = mpsc::sync_channel::<UpdateMessage>(0);
+
             workers.push(UpdateWorker::new(
                 id,
-                Arc::clone(&receiver),
+                sender,
+                receiver,
                 Arc::clone(&moments),
                 Arc::clone(&temperature),
                 Arc::clone(&external_field),
@@ -418,7 +465,6 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             temperature,
             external_field,
             scratch_moments,
-            sender,
             thread_pool: workers,
             hamiltonian,
         };
@@ -501,6 +547,18 @@ pub fn column_edit<T: Clone>(mat: &mut Matrix<T>, column: usize, values: Vec<T>)
     for i in 0..mat.n_rows {
         mat.data[i * mat.n_cols + column] = values[i].clone();
     }
+}
+
+pub fn find_slot_index<T: PartialOrd>(vec: &Vec<T>, value: &T) -> usize {
+    //note by implication anything beyond either end is put in first or last slot without limit
+    let mut index = 0;
+    for i in 1..vec.len() {
+        //use of 1 above bins anything less than vec[1] into the first slot
+        if vec[i] <= *value {
+            index += 1;
+        }
+    }
+    return index;
 }
 
 #[cfg(test)]

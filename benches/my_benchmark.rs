@@ -1,3 +1,7 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
+#![allow(unused_mut)]
 use criterion::{black_box, criterion_group, criterion_main, Criterion};
 use hello_rust::*;
 fn to_be_benched() {
@@ -14,13 +18,19 @@ fn to_be_benched() {
     let new_vec_temps = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.].repeat(lattice.n_rows);
 
     for idx_t in 0..100 {
-        lattice.new_update();
+        lattice.full_update();
         //lattice.update((1, 1))
     }
 }
 fn criterion_benchmark(c: &mut Criterion) {
     c.bench_function("ising", |b| b.iter(|| to_be_benched()));
 }
+criterion_group! {
+    name = benches;
+    // This can be any expression that returns a `Criterion` object.
+    config = Criterion::default().sample_size(10);
+    targets = criterion_benchmark
 
-criterion_group!(benches, criterion_benchmark);
+}
+//criterion_group!(benches, criterion_benchmark);
 criterion_main!(benches);

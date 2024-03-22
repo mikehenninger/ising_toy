@@ -15,7 +15,6 @@ use plotly::{HeatMap, ImageFormat, Layout, Plot};
 // also, n_cols vs n_columns
 
 fn main() {
-    
     let hsize: (usize, usize) = (3, 3);
     let mut hmap = Matrix::new(hsize.0, hsize.1, vec![1.0; hsize.0 * hsize.1]);
     hmap[(0, 0)] = 0.0;
@@ -44,7 +43,7 @@ fn main() {
     let max_iter = 50;
     let mut mag_over_time: Vec<f64> = Vec::new();
     let mut temperature_over_time: Vec<f64> = Vec::new();
-    lattice.new_update();
+    lattice.full_update();
     for idx_t in 0..max_iter {
         let mut current_temp = 5.01 - (idx_t as f64 / (max_iter as f64) * 5.0);
         //let current_temp = 0.5;
@@ -59,7 +58,7 @@ fn main() {
         //     lattice.moments_as_heatmap(format!("{idx_t}.png"), false);
         //     println!("Temperature: {}", current_temp);
         // }
-        lattice.new_update();
+        lattice.full_update();
 
         //println!("Temperature: {}", current_temp);
     }
