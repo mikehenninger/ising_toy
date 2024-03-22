@@ -498,6 +498,8 @@ dependencies = [
  "criterion",
  "plotly",
  "rand",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

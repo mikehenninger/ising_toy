@@ -7,17 +7,30 @@
 use plotly::common::Title;
 use plotly::{HeatMap, ImageFormat, Layout, Plot};
 use rand::Rng;
+use serde::{Deserialize, Serialize};
+use serde_json::{Result, Value};
 
 use core::panic;
 use std::ops::{Index, IndexMut};
 use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
 use std::thread::{self, sleep, JoinHandle};
 use std::time::Duration;
-pub static DEFAULT_MAGNETIC_MOMENT: f64 = 1.0;
-pub static DEFAULT_TEMPERATURE: f64 = 0.5;
-pub static DEFAULT_EXTERNAL_FIELD: f64 = 0.0;
-pub static N_ROWS: usize = 200;
-pub static N_COLUMNS: usize = 200;
+
+#[derive(Serialize, Deserialize)]
+pub struct Config {
+    n_rows: usize,
+    n_columns: usize,
+    temperature: f64,
+    external_field: f64,
+    magnetic_moment: f64,
+    pub max_iter: usize,
+    n_threads: usize,
+}
+
+pub fn load_config() -> Config {
+    let config = std::fs::read_to_string("config.json").unwrap();
+    return serde_json::from_str(&config).unwrap();
+}
 
 pub trait Broadcast {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
@@ -396,45 +409,52 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         //println!("Copying from scratch releasing moments moments");
     }
 
-    pub fn new(n_rows: usize, n_columns: usize, hamiltonian: F) -> AlternateLattice<F>
+    pub fn new(c: &Config, hamiltonian: F) -> AlternateLattice<F>
     where
         F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send,
     {
-        let mut moments_data: Vec<f64> = Vec::with_capacity(N_ROWS * N_COLUMNS);
-        let mut temperature_data: Vec<f64> = Vec::with_capacity(N_ROWS * N_COLUMNS);
-        let mut external_field_data: Vec<f64> = Vec::with_capacity(N_ROWS * N_COLUMNS);
-        for _ in 0..N_COLUMNS * N_ROWS {
+        let n_rows = c.n_rows;
+        let n_columns = c.n_columns;
+        let mut moments_data: Vec<f64> = Vec::with_capacity(c.n_rows * c.n_columns);
+        let mut temperature_data: Vec<f64> = Vec::with_capacity(c.n_rows * c.n_columns);
+        let mut external_field_data: Vec<f64> = Vec::with_capacity(c.n_rows * c.n_columns);
+        for _ in 0..c.n_columns * c.n_columns {
             let r: f64 = rand::random();
             if r > 0.5 {
-                moments_data.push(-1.0 * DEFAULT_MAGNETIC_MOMENT);
+                moments_data.push(-1.0 * c.magnetic_moment);
             } else {
-                moments_data.push(DEFAULT_MAGNETIC_MOMENT);
+                moments_data.push(c.magnetic_moment);
             }
-            temperature_data.push(DEFAULT_TEMPERATURE);
-            external_field_data.push(DEFAULT_EXTERNAL_FIELD);
+            temperature_data.push(c.temperature);
+            external_field_data.push(c.external_field);
         }
-        let moments = Arc::new(RwLock::new(Matrix::new(N_ROWS, N_COLUMNS, moments_data)));
+        let moments = Arc::new(RwLock::new(Matrix::new(
+            c.n_rows,
+            c.n_columns,
+            moments_data,
+        )));
         let temperature = Arc::new(RwLock::new(Matrix::new(
-            N_ROWS,
-            N_COLUMNS,
+            c.n_rows,
+            c.n_columns,
             temperature_data,
         )));
         let external_field = Arc::new(RwLock::new(Matrix::new(
-            N_ROWS,
-            N_COLUMNS,
+            c.n_rows,
+            c.n_columns,
             external_field_data,
         )));
-        let n_threads = 48;
+        let n_threads = c.n_threads;
 
-        let mut thread_chunk_sizes = vec![N_ROWS * N_COLUMNS];
+        let mut thread_chunk_sizes = vec![c.n_rows * c.n_columns];
 
         if n_threads > 1 {
-            let is_round_multiple = (N_ROWS * N_COLUMNS) % (n_threads) == 0;
+            let is_round_multiple = (c.n_rows * c.n_columns) % (n_threads) == 0;
             if is_round_multiple {
-                thread_chunk_sizes = vec![(N_ROWS * N_COLUMNS) / n_threads; n_threads];
+                thread_chunk_sizes = vec![(c.n_rows * c.n_columns) / n_threads; n_threads];
             } else {
-                thread_chunk_sizes = vec![(N_ROWS * N_COLUMNS) / (n_threads - 1); n_threads - 1];
-                thread_chunk_sizes.push((N_ROWS * N_COLUMNS) % (n_threads - 1));
+                thread_chunk_sizes =
+                    vec![(c.n_rows * c.n_columns) / (n_threads - 1); n_threads - 1];
+                thread_chunk_sizes.push((c.n_rows * c.n_columns) % (n_threads - 1));
             }
         }
         let scratch_barrier = Arc::new(Barrier::new(n_threads + 1)); //+1 for main thread
