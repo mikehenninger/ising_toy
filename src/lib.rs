@@ -135,7 +135,7 @@ where
 
 pub struct UpdateWorker<F: Clone + Send> {
     pub id: usize,
-    pub thread: thread::JoinHandle<()>,
+    pub thread: Option<thread::JoinHandle<()>>,
     pub moments: Arc<RwLock<Matrix<f64>>>,
     pub temperature: Arc<RwLock<Matrix<f64>>>,
     pub external_field: Arc<RwLock<Matrix<f64>>>,
@@ -232,7 +232,7 @@ impl<F: Clone + Send> UpdateWorker<F> {
         UpdateWorker {
             id,
             sender,
-            thread,
+            thread: Some(thread),
             moments: ref_copy_moments,
             temperature: ref_copy_temperature,
             external_field: ref_copy_external_field,
@@ -282,6 +282,16 @@ pub struct AlternateLattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f6
 impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'static>
     AlternateLattice<F>
 {
+    pub fn shutdown_threads(&mut self) -> () {
+        for worker in &mut self.thread_pool {
+            worker.sender.send(UpdateMessage::Stop).unwrap();
+            println!("Shutting down worker {}", worker.id);
+
+            if let Some(thread) = worker.thread.take() {
+                thread.join().unwrap();
+            }
+        }
+    }
     pub fn set_temperature<T>(&mut self, temperature: T) -> ()
     where
         T: Broadcast,
@@ -418,7 +428,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         let mut moments_data: Vec<f64> = Vec::with_capacity(c.n_rows * c.n_columns);
         let mut temperature_data: Vec<f64> = Vec::with_capacity(c.n_rows * c.n_columns);
         let mut external_field_data: Vec<f64> = Vec::with_capacity(c.n_rows * c.n_columns);
-        for _ in 0..c.n_columns * c.n_columns {
+        for _ in 0..c.n_rows * c.n_columns {
             let r: f64 = rand::random();
             if r > 0.5 {
                 moments_data.push(-1.0 * c.magnetic_moment);
