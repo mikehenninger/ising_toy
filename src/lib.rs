@@ -589,6 +589,51 @@ pub fn mapped_hamiltonian(
     };
 }
 
+pub fn conway_life_hamiltonian(
+    moments: &Matrix<f64>,
+    background_field: &Matrix<f64>,
+    index: &(i64, i64),
+) -> f64 {
+    // per https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life
+    // Any live cell with fewer than two live neighbors dies, as if by underpopulation.
+    // Any live cell with two or three live neighbors lives on to the next generation.
+    // Any live cell with more than three live neighbors dies, as if by overpopulation.
+    // Any dead cell with exactly three live neighbors becomes a live cell, as if by reproduction.
+    // note that this is to produce the ENERGY of the site, not the state of it.  we want the correct state to
+    // have overwhelmingly less energy than the incorrect state, so `update` always selects it when it does its
+    // probability check.
+
+    let mut n_neighbors = 0;
+    let offset = (1, 1);
+    let mut site_state = 0.0; //always overwritten but compiler doesn't know that
+    for i in 0..3 {
+        for j in 0..3 {
+            if i == 1 && j == 1 {
+                site_state = moments[(i, j)];
+                continue; //don't add self to neighbors tally
+            }
+            //below converts -1/1 states to 0/1 neighbors. -1=dead
+            n_neighbors += (moments
+                [moments.wrap((i as i64 + index.0 - offset.0, j as i64 + index.1 - offset.1))]
+                as i32
+                + 1)
+                / 2;
+        }
+    }
+    let should_live = (n_neighbors == 3) || (n_neighbors == 2 && site_state > 0.0);
+    if should_live {
+        if site_state > 0.0 {
+            return -1e6; //alive and should stay alive
+        } else {
+            return 1e6; //dead and should come alive
+        }
+    } else if site_state > 0.0 {
+        return 1e6; //alive and should die
+    } else {
+        return -1e6; //dead and should stay dead
+    }
+}
+
 pub fn row_edit<T: Clone>(mat: &mut Matrix<T>, row: usize, values: Vec<T>) -> () {
     for i in 0..mat.n_columns {
         mat.data[row * mat.n_columns + i] = values[i].clone();

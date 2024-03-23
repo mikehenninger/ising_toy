@@ -26,8 +26,8 @@ fn main() {
     hmap[(2, 2)] = 0.0;
     hmap[(1, 1)] = 0.0;
 
-    let hamiltonian = mapped_hamiltonian(&hmap);
-    let mut lattice = AlternateLattice::new(&c, hamiltonian);
+    //let hamiltonian = mapped_hamiltonian(&hmap);
+    let mut lattice = AlternateLattice::new(&c, conway_life_hamiltonian);
     // let ffs = lattice.n_columns / 2;
     // let new_vec_external_field = (-(ffs as i64)..(ffs as i64))
     //     .map(|x| (x as f64) * 0.05)
@@ -53,30 +53,30 @@ fn main() {
         mag_over_time.push(current_mag);
         energy_over_time.push(lattice.energy());
         temperature_over_time.push(current_temp);
-        if idx_t % (max_iter / 11) == 0 {
+        if idx_t % (max_iter / 10) == 0 {
             lattice.moments_as_heatmap(format!("{idx_t}.png"), false);
             println!(
                 "Temperature: {}",
                 lattice.temperature.read().unwrap()[(0, 0)]
             );
         }
-        //lattice.update_one_per_thread_random();
+        lattice.full_update();
 
-        lattice.update_n_per_thread_random(approx_n_per_thread / 10);
+        //lattice.update_n_per_thread_random(approx_n_per_thread / 10);
     }
     //println!("Temperature: {}", current_temp);
     lattice.shutdown_threads();
 
-    let mut mag_plot = Plot::new();
-    let mag_trace = plotly::Scatter::new(temperature_over_time.clone(), mag_over_time);
-    let layout = Layout::new().title(Title::new("Magnetization vs temperature"));
-    mag_plot.add_trace(mag_trace);
-    mag_plot.set_layout(layout);
-    mag_plot.show();
-    let mut energy_plot = Plot::new();
-    let energy_trace = plotly::Scatter::new(temperature_over_time, energy_over_time);
-    let layout = Layout::new().title(Title::new("energy vs temperature"));
-    energy_plot.add_trace(energy_trace);
-    energy_plot.set_layout(layout);
-    energy_plot.show();
+    // let mut mag_plot = Plot::new();
+    // let mag_trace = plotly::Scatter::new(temperature_over_time.clone(), mag_over_time);
+    // let layout = Layout::new().title(Title::new("Magnetization vs temperature"));
+    // mag_plot.add_trace(mag_trace);
+    // mag_plot.set_layout(layout);
+    // mag_plot.show();
+    // let mut energy_plot = Plot::new();
+    // let energy_trace = plotly::Scatter::new(temperature_over_time, energy_over_time);
+    // let layout = Layout::new().title(Title::new("energy vs temperature"));
+    // energy_plot.add_trace(energy_trace);
+    // energy_plot.set_layout(layout);
+    // energy_plot.show();
 }
