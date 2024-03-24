@@ -1,9 +1,9 @@
 {
-    "n_rows": 5,
-    "n_columns": 5,
+    "n_rows": 20,
+    "n_columns": 30,
     "temperature": 0.01,
     "external_field": 0.0,
     "magnetic_moment": 1.0,
-    "max_iter": 10,
-    "n_threads": 1
+    "max_iter": 1000,
+    "n_threads": 12
 }

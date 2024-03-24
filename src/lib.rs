@@ -349,10 +349,10 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
     // tentatively think this is safe, as the barrier is only reached by worker thread
     // once per UpdateMessage sent.  it deadlocks if any worker thread dies but the whole thing is f'ed if so--just won't panic out :/
     pub fn full_update(&mut self) -> () {
-        self.can_wait_scratch_barrier = true;
         for worker in self.thread_pool.iter() {
             worker.sender.send(UpdateMessage::All).unwrap();
         }
+        self.can_wait_scratch_barrier = true;
         self.copy_from_scratch();
     }
 
@@ -606,21 +606,29 @@ pub fn conway_life_hamiltonian(
     let mut n_neighbors = 0;
     let offset = (1, 1);
     let mut site_state = 0.0; //always overwritten but compiler doesn't know that
+
     for i in 0..3 {
         for j in 0..3 {
             if i == 1 && j == 1 {
-                site_state = moments[(i, j)];
+                site_state = moments[moments.wrap(*index)];
                 continue; //don't add self to neighbors tally
             }
             //below converts -1/1 states to 0/1 neighbors. -1=dead
-            n_neighbors += (moments
-                [moments.wrap((i as i64 + index.0 - offset.0, j as i64 + index.1 - offset.1))]
-                as i32
-                + 1)
-                / 2;
+            let (ui, uj) =
+                moments.wrap((i as i64 + index.0 - offset.0, j as i64 + index.1 - offset.1));
+            let tmp = (moments[(ui, uj)] as i32 + 1) / 2;
+            n_neighbors += tmp;
+            //println!("site ({},{}) has {} cell(s)", ui, uj, tmp);
         }
     }
     let should_live = (n_neighbors == 3) || (n_neighbors == 2 && site_state > 0.0);
+    // println!(
+    //     "Site loc: {},{}, n_neighbors: {}, should_live: {}",
+    //     moments.wrap((index.0, index.1)).0,
+    //     moments.wrap((index.0, index.1)).1,
+    //     n_neighbors,
+    //     should_live
+    // );
     if should_live {
         if site_state > 0.0 {
             return -1e6; //alive and should stay alive

@@ -34,13 +34,23 @@ fn main() {
     //     .collect::<Vec<f64>>()
     //     .repeat(lattice.n_rows);
     //lattice.sequential_update();
+
+    let ffs = lattice.n_columns / 2;
+    let new_vec_moments = (-(ffs as i64)..(ffs as i64))
+        .map(|x| -1.0) //(x as f64) * -1.0)
+        .collect::<Vec<f64>>()
+        .repeat(lattice.n_rows);
+    let mut new_mat_moments = Matrix::new(lattice.n_rows, lattice.n_columns, new_vec_moments);
+    new_mat_moments[(0, 0)] = 1.0;
+    //*lattice.moments.write().unwrap() = new_mat_moments;
+
     let max_iter = c.max_iter;
     let mut mag_over_time: Vec<f64> = Vec::new();
     let mut energy_over_time: Vec<f64> = Vec::new();
     let mut temperature_over_time: Vec<f64> = Vec::new();
     let approx_n_per_thread = lattice.n_columns * lattice.n_rows / lattice.thread_pool.len();
     println!("Approx n per thread: {}", approx_n_per_thread);
-    lattice.full_update(); //XXX needed to fill scratch, but why is that required?
+    //lattice.full_update(); //XXX needed to fill scratch, but why is that required?
     for idx_t in 0..max_iter {
         let mut current_temp = 4.01 - (idx_t as f64 / (max_iter as f64) * 5.0);
         if current_temp < 0.01 {
