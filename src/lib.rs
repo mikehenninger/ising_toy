@@ -282,14 +282,11 @@ pub enum UpdateMessage {
 pub struct AlternateLattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send> {
     pub n_rows: usize,
     pub n_columns: usize,
-    pub moments: Arc<RwLock<Matrix<f64>>>,
+    moments: Arc<RwLock<Matrix<f64>>>,
     pub temperature: Arc<RwLock<Matrix<f64>>>,
     pub external_field: Arc<RwLock<Matrix<f64>>>,
     scratch_moments: Vec<Arc<Mutex<Vec<f64>>>>,
-    //pub sender: mpsc::SyncSender<UpdateMessage>,
     pub thread_pool: Vec<UpdateWorker<F>>,
-    // pub local_hamiltonian: fn(&Matrix<f64>, &Matrix<f64>, &Matrix<f64>, (i64, i64)) -> f64,
-    // pub hamiltonian_map: Matrix<f64>,
     pub hamiltonian: F,
     scratch_barrier: Arc<Barrier>,
     can_wait_scratch_barrier: bool,
@@ -421,15 +418,45 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             for scratch_loc in 0..scratch_moments.len() {
                 let absolute_loc = scratch_loc + scratch_offset;
                 let (ui, uj) = (absolute_loc / self.n_columns, absolute_loc % self.n_columns);
-                if !(zero_check && scratch_moments[scratch_loc] == 0.0) {
-                    actual_moments[(ui, uj)] = scratch_moments[scratch_loc];
-                }
+                //if !(zero_check && scratch_moments[scratch_loc] == 0.0) {
+                actual_moments[(ui, uj)] = scratch_moments[scratch_loc];
+                //}
             }
         }
         self.can_wait_scratch_barrier = false;
         //println!("Copying from scratch releasing moments moments");
     }
-
+    fn copy_to_scratch(&mut self) -> () {
+        let moments_read = self.moments.read().unwrap();
+        for ui in 0..self.n_rows {
+            for uj in 0..self.n_columns {
+                let idx_linear = ui * self.n_columns + uj;
+                let idx_thread = find_slot_index(
+                    &self
+                        .thread_pool
+                        .iter()
+                        .map(|x| x.scratch_offset)
+                        .collect::<Vec<usize>>(),
+                    &idx_linear,
+                );
+                let mut scratch_moments = self.scratch_moments[idx_thread].lock().unwrap();
+                scratch_moments[idx_linear - self.thread_pool[idx_thread].scratch_offset] =
+                    moments_read[(ui, uj)];
+            }
+        }
+    }
+    pub fn write_moments(&mut self, new_moments: Matrix<f64>) -> () {
+        {
+            //scope for moments write lock; must end before copy_to_scratch
+            let mut moments = self.moments.write().unwrap();
+            for i in 0..self.n_rows {
+                for j in 0..self.n_columns {
+                    moments[(i, j)] = new_moments[(i, j)];
+                }
+            }
+        }
+        self.copy_to_scratch()
+    }
     pub fn new(c: &Config, hamiltonian: F) -> AlternateLattice<F>
     where
         F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send,
@@ -510,7 +537,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             ));
         }
         let can_wait_scratch_barrier = false;
-        return AlternateLattice {
+        let mut ret_val = AlternateLattice {
             n_rows,
             n_columns,
             moments,
@@ -522,7 +549,12 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             scratch_barrier,
             can_wait_scratch_barrier,
         };
+        // now that the lattice exists, we can invoke methods on it to complete
+        // init
+        ret_val.copy_to_scratch();
+        return ret_val;
     }
+
     pub fn energy(&self) -> f64 {
         let mut energy = 0.0;
         let actual_moments = self.moments.read().unwrap();
