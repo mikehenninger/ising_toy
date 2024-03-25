@@ -3,7 +3,7 @@
 #![allow(unused_variables)]
 #![allow(dead_code)]
 #![allow(unused_mut)]
-//! # doc test
+//! # Some code to demonstrate the use of the ising model
 //!
 use hello_rust::*;
 use std::cell::RefCell;
@@ -16,12 +16,22 @@ use plotly::{HeatMap, ImageFormat, Layout, Plot};
 //TODO: sort out rows and columns for consistency; not sure at all if I'm using the terms consistently rn
 // also, n_cols vs n_columns
 
+/// Main function that runs the Ising model simulation.
+/// It creates a lattice, and then runs the simulation for a number of iterations.
+/// For demonstration purposes it changes the temperature of the lattice over time.
+/// It then plots the magnetization and energy of the lattice over time.
+/// you can see the curie temperature around T ~ 2, even without an external magnetic field!
+/// Check out the energy vs T plot to see this.
+/// The "hamiltonian" function can be (ab)used to create lattices that simulate
+///  something other than the ising model.  `conway_life_hamiltonian` is an example
+/// that simulates Conway's Game of Life.
 fn main() {
-    let c = load_config();
+    let c = load_config(None);
 
     let hamiltonian = standard_ising_hamiltonian();
-    let mut lattice = AlternateLattice::new(&c, hamiltonian);
-    //let mut lattice = AlternateLattice::new(&c, conway_life_hamiltonian);
+    let mut lattice = Lattice::new(&c, hamiltonian);
+
+    //let mut lattice = Lattice::new(&c, conway_life_hamiltonian);
 
     let ffs = lattice.n_columns / 2;
 
@@ -42,22 +52,21 @@ fn main() {
         mag_over_time.push(current_mag);
         energy_over_time.push(lattice.energy());
         temperature_over_time.push(current_temp);
-        if idx_t % (max_iter / 10) == 0 || idx_t == max_iter - 1 {
-            let real_temperature = lattice.temperature.read().unwrap()[(0, 0)]; //get the _actual_ temp as the lattice sees it.
-            println!("Temperature: {}", real_temperature);
-            lattice.moments_as_heatmap(
-                format!("{idx_t}.png"),
-                format!("{}", real_temperature),
-                false,
-            );
-        }
+        // if idx_t % (max_iter / 10) == 0 || idx_t == max_iter - 1 {
+        //     let real_temperature = lattice.temperature.read().unwrap()[(0, 0)]; //get the _actual_ temp as the lattice sees it.
+        //     println!("Temperature: {}", real_temperature);
+        //     lattice.moments_as_heatmap(
+        //         format!("{idx_t}.png"),
+        //         format!("{}", real_temperature),
+        //         false,
+        //     );
+        // }
 
-        //lattice.full_update();
-
-        lattice.update_n_per_thread_random(approx_n_per_thread / 10);
+        lattice.update_n_per_thread_random(approx_n_per_thread / 5);
     }
     lattice.shutdown_threads();
 
+    //now plot the magnetization and energy over time in a web browser
     let mut mag_plot = Plot::new();
     let mag_trace = plotly::Scatter::new(temperature_over_time.clone(), mag_over_time);
     let layout = Layout::new().title(Title::new("Magnetization vs temperature"));

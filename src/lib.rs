@@ -8,13 +8,15 @@ use plotly::common::Title;
 use plotly::{HeatMap, ImageFormat, Layout, Plot};
 use rand::Rng;
 use serde::{Deserialize, Serialize};
-use serde_json::{Result, Value};
+//use serde_json::{Result, Value};
 
 use core::panic;
 use std::ops::{Index, IndexMut};
 use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
-use std::thread::{self, sleep, JoinHandle};
-use std::time::Duration;
+use std::thread;
+
+/// Represents the configuration for a simulation.
+/// Typically loaded from disk using `load_config()`.
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
@@ -27,20 +29,42 @@ pub struct Config {
     n_threads: usize,
 }
 
-pub fn load_config() -> Config {
-    let config = std::fs::read_to_string("config.json").unwrap();
+/// Loads the simulation configuration from a file.
+/// If `filename` is provided, it reads the configuration from that file.
+/// Otherwise, it reads from the default file "config.json".
+
+pub fn load_config(filename: Option<&str>) -> Config {
+    let config: String;
+    match filename {
+        Some(filename) => {
+            config = std::fs::read_to_string(filename).unwrap();
+        }
+        None => {
+            config = std::fs::read_to_string("config.json").unwrap();
+        }
+    }
     return serde_json::from_str(&config).unwrap();
 }
 
+/// A trait for broadcasting a value or a matrix to a given shape.
+
 pub trait Broadcast {
+    /// Broadcasts a value to the specified shape.
+    /// Returns a matrix with the specified shape,
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
 }
+
+/// Implementation of the `Broadcast` trait for the `f64` type.
+/// fills each element with the value of the f64.
 
 impl Broadcast for f64 {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64> {
         return Matrix::new(shape.0, shape.1, vec![*self; shape.0 * shape.1]);
     }
 }
+
+/// Implementation of the `Broadcast` trait for the `Matrix<f64>` type.
+/// Bare bones: it just checks that the shape is right then sends on a copy.
 
 impl Broadcast for Matrix<f64> {
     fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64> {
@@ -49,6 +73,11 @@ impl Broadcast for Matrix<f64> {
         return self.clone();
     }
 }
+
+/// Represents a matrix of elements of type `T`.
+/// The matrix is stored as a flat vector in row-major order.
+/// Super bare bones, but since I wanted to add a minimal set of crates while learning
+/// I did it myself, implementing just what I needed
 pub struct Matrix<T: Clone> {
     pub n_rows: usize,
     pub n_columns: usize,
@@ -56,10 +85,12 @@ pub struct Matrix<T: Clone> {
 }
 
 impl<T: Clone> Matrix<T> {
+    /// Converts the matrix to a vector of vectors in the shape of the matrix
+    /// Each inner vector represents a row of the matrix.
+    /// used by plotly for 2d maps
     pub fn as_vec_vec(&self) -> Vec<Vec<T>> {
         let mut vec_vec = Vec::new();
         for i in 0..self.n_rows {
-            //TODO: VECTORIZE THIS
             let mut row = Vec::new();
             for j in 0..self.n_columns {
                 row.push((*self.index((i, j))).clone());
@@ -68,6 +99,10 @@ impl<T: Clone> Matrix<T> {
         }
         vec_vec
     }
+
+    /// Creates a new matrix with the specified number of rows, columns, and data.
+    /// The length of the data vector must match the product of the number of rows and columns.
+
     pub fn new(n_rows: usize, n_cols: usize, data: Vec<T>) -> Self {
         assert_eq!(
             n_rows * n_cols,
@@ -80,10 +115,16 @@ impl<T: Clone> Matrix<T> {
             data,
         }
     }
+
+    /// Wraps the given index to handle negative indices and indices larger than the matrix dimensions.
+    /// Returns the wrapped index as a tuple of row and column indices.
+    /// This is really handy because updating requires the hamiltonian probing
+    /// nearby sites, and this way it wraps around the edges cleanly, not barfing
+    /// on negative indices or indices larger than the matrix dimensions.
+
     pub fn wrap(&self, index: (i64, i64)) -> (usize, usize) {
         let mut i = index.0;
         let mut j = index.1;
-        // % doesn't modulo negative numbers, so we wrap by hand
         while i < 0 {
             i += self.n_rows as i64;
         }
@@ -95,6 +136,9 @@ impl<T: Clone> Matrix<T> {
         (i as usize, j as usize)
     }
 }
+
+/// Indexing implementation for the `Matrix` type.
+/// Allows accessing elements of the matrix using the `(row, column)` index.
 
 impl<T: Clone> Index<(usize, usize)> for Matrix<T> {
     type Output = T;
@@ -108,9 +152,10 @@ impl<T: Clone> Index<(usize, usize)> for Matrix<T> {
     }
 }
 
+/// Mutable indexing implementation for the `Matrix` type.
+/// Allows modifying elements of the matrix using the `(row, column)` index.
+/// Required so you can mutate an element of the matrix.
 impl<T: Clone> IndexMut<(usize, usize)> for Matrix<T> {
-    //type Output = T;
-
     fn index_mut(&mut self, index: (usize, usize)) -> &mut Self::Output {
         assert!(
             index.0 < self.n_rows && index.1 < self.n_columns,
@@ -120,6 +165,8 @@ impl<T: Clone> IndexMut<(usize, usize)> for Matrix<T> {
     }
 }
 
+/// Clone implementation for the `Matrix` type.
+/// Creates a deep copy of the matrix.
 impl<T> Clone for Matrix<T>
 where
     T: Clone,
@@ -133,6 +180,12 @@ where
     }
 }
 
+/// Represents an update worker for the simulation.
+/// Each worker runs in its own thread and updates a portion of the lattice.
+/// The worker takes read access on the RwLocks for input matrices and mutex
+/// lock to update its scratch region--which maps to moments in the main lattice.
+/// The worker gets UpdateMessages from the parent Lattice, and the parent also
+/// copies the updated moments from the scratch region back to the main `moments`.
 pub struct UpdateWorker<F: Clone + Send> {
     pub id: usize,
     pub thread: Option<thread::JoinHandle<()>>,
@@ -146,6 +199,18 @@ pub struct UpdateWorker<F: Clone + Send> {
     hamiltonian: F,
 }
 impl<F: Clone + Send> UpdateWorker<F> {
+    /// This is enormous and I need to figure out a good way to decompose it
+    /// the magic happens in the enormous closure run by the spawned thread.
+    /// The struct gets both ends of a channel, but `UpdateWorker.sender` isn't
+    /// moved into the thread and it's where you submit your message.  The channel
+    /// is SPSC, with each thread having its own.
+    /// The closure is a loop that waits for a message, then updates the scratch region
+    /// there is a barrier at the end of the loop that ensures all threads have finished
+    /// the last barrier member is in `Lattice.copy_from_scratch``, which holds
+    /// on copying scratch to `moments` until all threads have finished updating.
+    /// The barrier waits at the END of each thread's loop, but the START of
+    /// `Lattice.copy_from_scratch`
+
     pub fn new(
         id: usize,
         sender: mpsc::SyncSender<UpdateMessage>, //NOT moved into the thread
@@ -179,7 +244,7 @@ impl<F: Clone + Send> UpdateWorker<F> {
                     .read()
                     .expect("Could not read external field");
 
-                let mut update_loc = match update_message {
+                let update_loc = match update_message {
                     UpdateMessage::Location(i, j) => vec![(i as i64, j as i64)],
                     UpdateMessage::All => {
                         let mut all_locs = Vec::new();
@@ -203,7 +268,7 @@ impl<F: Clone + Send> UpdateWorker<F> {
                         let mut rng = rand::thread_rng();
                         let mut all_locs = Vec::new();
 
-                        for i in 0..n {
+                        for _i in 0..n {
                             let local_offset = rng.gen_range(0..scratch_len);
 
                             let (ui, uj) = linear_to_matrix_index(
@@ -258,7 +323,13 @@ impl<F: Clone + Send> UpdateWorker<F> {
         }
     }
 }
-//type Job = Box<dyn FnOnce() + Send + 'static>;
+
+/// The possible messages that can be sent to an update worker.
+/// `Location(i, j)` indicates that the worker should update the site at row `i` and column `j`.
+/// `All` indicates that the worker should update all sites in its scratch region.
+/// `Ignore` indicates that the worker should ignore the message, but still trigger the barrier.
+/// `Stop` indicates that the worker should stop processing messages and exit.
+/// `UpdateN(n)` indicates that the worker should update `n` random sites in its scratch region.
 pub enum UpdateMessage {
     Location(usize, usize),
     All,
@@ -267,19 +338,10 @@ pub enum UpdateMessage {
     UpdateN(usize),
 }
 
-// impl Clone for UpdateLocation {
-//     fn clone(&self) -> UpdateLocation {
-//         let i = self.i;
-//         let j = self.j;
-//         let scratch_moment = Arc::clone(&self.scratch_moment);
-//         UpdateLocation {
-//             i,
-//             j,
-//             scratch_moment,
-//         }
-//     }
-// }
-pub struct AlternateLattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send> {
+/// The lattice struct is the main interface for the simulation.
+/// It contains the lattice data, temperature, and external field as matrices
+/// and it orchestrates each worker thread and its scratch region for making updates.
+pub struct Lattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send> {
     pub n_rows: usize,
     pub n_columns: usize,
     moments: Arc<RwLock<Matrix<f64>>>,
@@ -292,13 +354,11 @@ pub struct AlternateLattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f6
     can_wait_scratch_barrier: bool,
 }
 
-impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'static>
-    AlternateLattice<F>
-{
+impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'static> Lattice<F> {
+    /// Shuts down all worker threads in the lattice. Can't update after this is called.
     pub fn shutdown_threads(&mut self) -> () {
         for worker in &mut self.thread_pool {
             worker.sender.send(UpdateMessage::Stop).unwrap();
-            println!("Shutting down worker {}", worker.id);
 
             if let Some(thread) = worker.thread.take() {
                 thread.join().unwrap();
@@ -350,7 +410,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             worker.sender.send(UpdateMessage::All).unwrap();
         }
         self.can_wait_scratch_barrier = true;
-        self.copy_from_scratch(false);
+        self.copy_from_scratch();
     }
 
     pub fn update_n_per_thread_random(&mut self, n: usize) -> () {
@@ -361,7 +421,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             worker.sender.send(UpdateMessage::UpdateN(n)).unwrap();
         }
         self.can_wait_scratch_barrier = true;
-        self.copy_from_scratch(true);
+        self.copy_from_scratch();
     }
     pub fn incremental_update(&mut self) -> () {
         self.can_wait_scratch_barrier = true;
@@ -384,7 +444,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         }
 
         //copy_from_scratch has a barrier that ensures all threads have finished updating
-        self.copy_from_scratch(false);
+        self.copy_from_scratch();
         //println!("Done copying from scratch");
     }
 
@@ -402,7 +462,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
 
     //     self.copy_from_scratch();
     // }
-    fn copy_from_scratch(&mut self, zero_check: bool) -> () {
+    fn copy_from_scratch(&mut self) -> () {
         // DON"T call this more than once per update cycle or it'll deadlock with
         // the threads that have already finished waiting on the barrier
         if !self.can_wait_scratch_barrier {
@@ -418,13 +478,11 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             for scratch_loc in 0..scratch_moments.len() {
                 let absolute_loc = scratch_loc + scratch_offset;
                 let (ui, uj) = (absolute_loc / self.n_columns, absolute_loc % self.n_columns);
-                //if !(zero_check && scratch_moments[scratch_loc] == 0.0) {
+
                 actual_moments[(ui, uj)] = scratch_moments[scratch_loc];
-                //}
             }
         }
         self.can_wait_scratch_barrier = false;
-        //println!("Copying from scratch releasing moments moments");
     }
     fn copy_to_scratch(&mut self) -> () {
         let moments_read = self.moments.read().unwrap();
@@ -457,7 +515,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         }
         self.copy_to_scratch()
     }
-    pub fn new(c: &Config, hamiltonian: F) -> AlternateLattice<F>
+    pub fn new(c: &Config, hamiltonian: F) -> Lattice<F>
     where
         F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send,
     {
@@ -537,7 +595,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             ));
         }
         let can_wait_scratch_barrier = false;
-        let mut ret_val = AlternateLattice {
+        let mut ret_val = Lattice {
             n_rows,
             n_columns,
             moments,

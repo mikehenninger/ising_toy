@@ -4,6 +4,6 @@
     "temperature": 0.01,
     "external_field": 0.0,
     "magnetic_moment": 1.0,
-    "max_iter": 300,
+    "max_iter": 150,
     "n_threads": 12
 }
