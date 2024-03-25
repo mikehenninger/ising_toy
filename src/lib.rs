@@ -353,7 +353,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             worker.sender.send(UpdateMessage::All).unwrap();
         }
         self.can_wait_scratch_barrier = true;
-        self.copy_from_scratch();
+        self.copy_from_scratch(false);
     }
 
     pub fn update_n_per_thread_random(&mut self, n: usize) -> () {
@@ -364,7 +364,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             worker.sender.send(UpdateMessage::UpdateN(n)).unwrap();
         }
         self.can_wait_scratch_barrier = true;
-        self.copy_from_scratch();
+        self.copy_from_scratch(true);
     }
     pub fn incremental_update(&mut self) -> () {
         self.can_wait_scratch_barrier = true;
@@ -387,7 +387,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         }
 
         //copy_from_scratch has a barrier that ensures all threads have finished updating
-        self.copy_from_scratch();
+        self.copy_from_scratch(false);
         //println!("Done copying from scratch");
     }
 
@@ -405,7 +405,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
 
     //     self.copy_from_scratch();
     // }
-    fn copy_from_scratch(&mut self) -> () {
+    fn copy_from_scratch(&mut self, zero_check: bool) -> () {
         // DON"T call this more than once per update cycle or it'll deadlock with
         // the threads that have already finished waiting on the barrier
         if !self.can_wait_scratch_barrier {
@@ -421,7 +421,9 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
             for scratch_loc in 0..scratch_moments.len() {
                 let absolute_loc = scratch_loc + scratch_offset;
                 let (ui, uj) = (absolute_loc / self.n_columns, absolute_loc % self.n_columns);
-                actual_moments[(ui, uj)] = scratch_moments[scratch_loc];
+                if !(zero_check && scratch_moments[scratch_loc] == 0.0) {
+                    actual_moments[(ui, uj)] = scratch_moments[scratch_loc];
+                }
             }
         }
         self.can_wait_scratch_barrier = false;
@@ -546,11 +548,16 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         }
         return net_magnetization;
     }
-    pub fn moments_as_heatmap(&self, filename: String, to_screen: bool) -> () {
+    pub fn moments_as_heatmap(
+        &self,
+        filename: String,
+        title_annotation: String,
+        to_screen: bool,
+    ) -> () {
         let trace = HeatMap::new_z(self.moments_as_vec_vec());
 
         let mut plot = Plot::new();
-        let title = Title::new("Magnetic Moments");
+        let title = Title::new(&format!("Magnetic Moments {}", title_annotation));
         let layout = Layout::new().title(title).width(2000).height(2000);
         plot.add_trace(trace);
         plot.set_layout(layout);
@@ -569,7 +576,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
 /// * [Wikipedia](https://en.wikipedia.org/wiki/Ising_model)
 // TODO: probably make this one of an enum of hamiltonians
 
-pub fn mapped_hamiltonian(
+pub fn mixin_map_hamiltonian(
     hamiltonian_map: &Matrix<f64>,
 ) -> impl Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone {
     let my_map = hamiltonian_map.clone();
@@ -589,6 +596,17 @@ pub fn mapped_hamiltonian(
     };
 }
 
+pub fn standard_ising_hamiltonian(
+) -> impl Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone {
+    let hsize: (usize, usize) = (3, 3);
+    let mut hmap = Matrix::new(hsize.0, hsize.1, vec![1.0; hsize.0 * hsize.1]);
+    hmap[(0, 0)] = 0.0;
+    hmap[(0, 2)] = 0.0;
+    hmap[(2, 0)] = 0.0;
+    hmap[(2, 2)] = 0.0;
+    hmap[(1, 1)] = 0.0;
+    return mixin_map_hamiltonian(&hmap);
+}
 pub fn conway_life_hamiltonian(
     moments: &Matrix<f64>,
     background_field: &Matrix<f64>,
@@ -631,14 +649,14 @@ pub fn conway_life_hamiltonian(
     // );
     if should_live {
         if site_state > 0.0 {
-            return -1e6; //alive and should stay alive
+            return -1e0; //alive and should stay alive
         } else {
-            return 1e6; //dead and should come alive
+            return 1e0; //dead and should come alive
         }
     } else if site_state > 0.0 {
-        return 1e6; //alive and should die
+        return 1e0; //alive and should die
     } else {
-        return -1e6; //dead and should stay dead
+        return -1e0; //dead and should stay dead
     }
 }
 

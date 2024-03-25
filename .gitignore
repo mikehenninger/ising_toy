@@ -1,5 +1,6 @@
 /target
 *.png
+*.gif
 /.vscode
 # below is vtune directory
 /hello_rust(ising)
