@@ -1,5 +1,5 @@
 [package]
-name = "hello_rust"
+name = "ising_toy"
 version = "0.2.0"
 edition = "2021"
 

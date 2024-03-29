@@ -19,7 +19,7 @@
 // #![allow(unused_variables)]
 // #![allow(dead_code)]
 // #![allow(unused_mut)]
-use hello_rust::*;
+use ising_toy::*;
 
 use plotly::common::Title;
 use plotly::{Layout, Plot};

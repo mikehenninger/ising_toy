@@ -425,7 +425,8 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
 /// neighbors.  It results in a structure that has a characteristic length scale of 2-3 sites,
 /// which isn't much of a surprise.
 /// ```
-/// use hello_rust::*;
+/// use ising_toy::*;
+/// let c = load_config(None);
 /// let hsize: (usize, usize) = (5, 5);
 /// let mut interaction_strenghts = Matrix::new(hsize.0, hsize.1, vec![0.0; hsize.0 * hsize.1]);
 /// interaction_strenghts[(2, 0)] = -0.5;
