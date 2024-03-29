@@ -1,17 +1,28 @@
+/// An Ising model simulation, extensible to other model hamiltonians.
+/// Copyright (C) 2024, Michael A. Henninger
+
+/// This program is free software; you can redistribute it and/or modify
+/// it under the terms of the GNU General Public License as published by
+/// the Free Software Foundation; either version 2 of the License, or
+/// (at your option) any later version.
+
+/// This program is distributed in the hope that it will be useful,
+/// but WITHOUT ANY WARRANTY; without even the implied warranty of
+/// MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+/// GNU General Public License for more details.
+
+/// You should have received a copy of the GNU General Public License along
+/// with this program; if not, write to the Free Software Foundation, Inc.,
+/// 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
 // turn below off for final checking
-#![allow(unused_imports)]
-#![allow(unused_variables)]
-#![allow(dead_code)]
-#![allow(unused_mut)]
-//! # Some code to demonstrate the use of the ising model
-//!
+// #![allow(unused_imports)]
+// #![allow(unused_variables)]
+// #![allow(dead_code)]
+// #![allow(unused_mut)]
 use hello_rust::*;
-use std::cell::RefCell;
-use std::os::windows::thread;
-use std::vec;
 
 use plotly::common::Title;
-use plotly::{HeatMap, ImageFormat, Layout, Plot};
+use plotly::{Layout, Plot};
 
 //TODO: sort out rows and columns for consistency; not sure at all if I'm using the terms consistently rn
 // also, n_cols vs n_columns
@@ -29,11 +40,10 @@ fn main() {
     let c = load_config(None);
 
     let hamiltonian = standard_ising_hamiltonian();
+
     let mut lattice = Lattice::new(&c, hamiltonian);
 
     //let mut lattice = Lattice::new(&c, conway_life_hamiltonian);
-
-    let ffs = lattice.n_columns / 2;
 
     let max_iter = c.max_iter;
     let mut mag_over_time: Vec<f64> = Vec::new();
@@ -52,15 +62,15 @@ fn main() {
         mag_over_time.push(current_mag);
         energy_over_time.push(lattice.energy());
         temperature_over_time.push(current_temp);
-        // if idx_t % (max_iter / 10) == 0 || idx_t == max_iter - 1 {
-        //     let real_temperature = lattice.temperature.read().unwrap()[(0, 0)]; //get the _actual_ temp as the lattice sees it.
-        //     println!("Temperature: {}", real_temperature);
-        //     lattice.moments_as_heatmap(
-        //         format!("{idx_t}.png"),
-        //         format!("{}", real_temperature),
-        //         false,
-        //     );
-        // }
+        if idx_t % (max_iter / 10) == 0 || idx_t == max_iter - 1 {
+            let real_temperature = lattice.temperature.read().unwrap()[(0, 0)]; //get the _actual_ temp as the lattice sees it.
+            println!("Temperature: {}", real_temperature);
+            lattice.moments_as_heatmap(
+                format!("{idx_t}.png"),
+                format!("{}", real_temperature),
+                false,
+            );
+        }
 
         lattice.update_n_per_thread_random(approx_n_per_thread / 5);
     }

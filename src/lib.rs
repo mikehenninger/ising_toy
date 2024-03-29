@@ -4,22 +4,26 @@
 #![allow(dead_code)]
 #![allow(unused_mut)]
 
+mod ultralight_matrix;
+mod update_worker;
+
+// all these imports are not idiomatic, but those types/identifiers/etc. are already so long
+pub use ultralight_matrix::matrix::*;
+pub use update_worker::*;
+
 use plotly::common::Title;
 use plotly::{HeatMap, ImageFormat, Layout, Plot};
-use rand::Rng;
 use serde::{Deserialize, Serialize};
-//use serde_json::{Result, Value};
 
-use core::panic;
-use std::ops::{Index, IndexMut};
 use std::sync::{mpsc, Arc, Barrier, Mutex, RwLock};
-use std::thread;
 
 /// Represents the configuration for a simulation.
 /// Typically loaded from disk using `load_config()`.
 
 #[derive(Serialize, Deserialize)]
 pub struct Config {
+    // XXX TODO: max_iter is an odd one out, as it's not a `Lattice` parameter.
+    // but I do want it to be changeable at runtime, so it's in config.json for now.
     n_rows: usize,    // number of rows of sites in the lattice
     n_columns: usize, // number of columns of sites in the lattice
     //below boils down to "these units are such that they plug directly into
@@ -51,306 +55,13 @@ pub fn load_config(filename: Option<&str>) -> Config {
     return serde_json::from_str(&config).unwrap();
 }
 
-/// A trait for broadcasting a value or a matrix to a given shape.
-
-pub trait Broadcast {
-    /// Broadcasts a value to the specified shape,
-    /// returning a matrix with the specified shape,
-    fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64>;
-}
-
-/// Implementation of the `Broadcast` trait for the `f64` type.
-/// fills each element with the f64 value that is self.
-/// Only needed this, so I haven't implemented any other types even though
-/// it's straightforward for this bare bones functionality
-
-impl Broadcast for f64 {
-    fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64> {
-        return Matrix::new(shape.0, shape.1, vec![*self; shape.0 * shape.1]);
-    }
-}
-
-/// Implementation of the `Broadcast` trait for the `Matrix<f64>` type.
-/// Bare bones: it just checks that the shape is right then sends on a copy.
-impl Broadcast for Matrix<f64> {
-    fn broadcast(&self, shape: (usize, usize)) -> Matrix<f64> {
-        assert_eq!(self.n_rows, shape.0);
-        assert_eq!(self.n_columns, shape.1);
-        return self.clone();
-    }
-}
-
-/// Represents a matrix of elements of type `T`.
-/// The matrix is stored as a flat vector in row-major order.
-/// Super bare bones, but since I wanted to add a minimal set of crates while learning
-/// I did it myself, implementing just what I needed
-/// I also assume there are real crates to do this, which I'd look for if I wasn't
-/// doing a purely learning exercise
-pub struct Matrix<T: Clone> {
-    pub n_rows: usize,
-    pub n_columns: usize,
-    pub data: Vec<T>,
-}
-
-impl<T: Clone> Matrix<T> {
-    /// Converts a copy of the matrix to a vector of vectors in the shape of the matrix
-    /// Each inner vector represents a row of the matrix.
-    /// used by plotly for 2d maps
-    pub fn copy_as_vec_vec(&self) -> Vec<Vec<T>> {
-        let mut vec_vec = Vec::new();
-        for i in 0..self.n_rows {
-            let mut row = Vec::new();
-            for j in 0..self.n_columns {
-                row.push((*self.index((i, j))).clone());
-            }
-            vec_vec.push(row);
-        }
-        vec_vec
-    }
-
-    /// Creates a new matrix with the specified number of rows, columns, and data.
-    /// The length of the data vector must match the product of the number of rows and columns.
-
-    pub fn new(n_rows: usize, n_cols: usize, data: Vec<T>) -> Self {
-        assert_eq!(
-            n_rows * n_cols,
-            data.len(),
-            "Data does not match dimensions"
-        );
-        Self {
-            n_rows,
-            n_columns: n_cols,
-            data,
-        }
-    }
-
-    /// Wraps the given index to handle negative indices and indices larger than the matrix dimensions.
-    /// Returns the wrapped index as a tuple of row and column indices.
-    /// This is really handy because updating requires the hamiltonian probing
-    /// nearby sites, and this way it wraps around the edges cleanly, not barfing
-    /// on negative indices or indices larger than the matrix dimensions.
-    pub fn wrap(&self, index: (i64, i64)) -> (usize, usize) {
-        let mut i = index.0;
-        let mut j = index.1;
-        while i < 0 {
-            i += self.n_rows as i64;
-        }
-        while j < 0 {
-            j += self.n_columns as i64;
-        }
-        i = i % self.n_rows as i64;
-        j = j % self.n_columns as i64;
-        (i as usize, j as usize)
-    }
-}
-
-/// Indexing implementation for the `Matrix` type.
-/// Allows accessing elements of the matrix using the `(row, column)` index.
-impl<T: Clone> Index<(usize, usize)> for Matrix<T> {
-    type Output = T;
-
-    fn index(&self, index: (usize, usize)) -> &Self::Output {
-        assert!(
-            index.0 < self.n_rows && index.1 < self.n_columns,
-            "Index out of bounds"
-        );
-        &self.data[index.0 * self.n_columns + index.1]
-    }
-}
-
-/// Mutable indexing implementation for the `Matrix` type.
-/// Allows modifying elements of the matrix using the `(row, column)` index.
-/// Required so you can mutate an element of the matrix.
-impl<T: Clone> IndexMut<(usize, usize)> for Matrix<T> {
-    fn index_mut(&mut self, index: (usize, usize)) -> &mut Self::Output {
-        assert!(
-            index.0 < self.n_rows && index.1 < self.n_columns,
-            "Index out of bounds"
-        );
-        &mut self.data[index.0 * self.n_columns + index.1]
-    }
-}
-
-/// Clone implementation for the `Matrix` type.
-/// Creates a deep copy of the matrix.
-impl<T> Clone for Matrix<T>
-where
-    T: Clone,
-{
-    fn clone(&self) -> Matrix<T> {
-        Matrix {
-            n_rows: self.n_rows,
-            n_columns: self.n_columns,
-            data: self.data.clone(),
-        }
-    }
-}
-
-/// Represents an update worker for the simulation.
-/// Each worker runs in its own thread and updates a portion of the lattice.
-/// The worker takes read access on the RwLocks for input matrices and mutex
-/// lock to update its scratch region--which maps to moments in the main lattice.
-/// The worker gets UpdateMessages from the parent Lattice, and the parent also
-/// copies the updated moments from the scratch region back to the main `moments`.
-pub struct UpdateWorker<F: Clone + Send> {
-    pub id: usize,
-    pub thread: Option<thread::JoinHandle<()>>,
-    pub moments: Arc<RwLock<Matrix<f64>>>,
-    pub temperature: Arc<RwLock<Matrix<f64>>>,
-    pub external_field: Arc<RwLock<Matrix<f64>>>,
-    pub scratch_region: Arc<Mutex<Vec<f64>>>,
-    pub scratch_offset: usize,
-    scratch_len: usize,
-    sender: mpsc::SyncSender<UpdateMessage>,
-    hamiltonian: F,
-}
-impl<F: Clone + Send> UpdateWorker<F> {
-    /// This is enormous and I need to set aside some time to decompose it.
-    /// The magic happens in the giant closure run by the spawned thread.
-    /// The struct gets both ends of a channel, but `UpdateWorker.sender` isn't
-    /// moved into the thread and it's where you submit your message.  The channel
-    /// is SPSC, with each thread having its own.
-    /// The closure is a loop that waits for a message, then updates the scratch region
-    /// there is a barrier at the end of the loop that ensures all threads have finished
-    /// the last barrier member is in `Lattice.copy_from_scratch``, which holds
-    /// on copying scratch to `moments` until all threads have finished updating.
-    /// The barrier waits at the END of each thread's loop, but the START of
-    /// `Lattice.copy_from_scratch`
-
-    pub fn new(
-        id: usize,
-        sender: mpsc::SyncSender<UpdateMessage>, //NOT moved into the thread
-        receiver: mpsc::Receiver<UpdateMessage>,
-        scratch_barrier: Arc<Barrier>,
-        moments: Arc<RwLock<Matrix<f64>>>,
-        temperature: Arc<RwLock<Matrix<f64>>>,
-        external_field: Arc<RwLock<Matrix<f64>>>,
-        scratch_region: Arc<Mutex<Vec<f64>>>,
-        scratch_offset: usize,
-        hamiltonian: F,
-    ) -> UpdateWorker<F>
-    where
-        F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'static,
-    {
-        let ref_copy_hamiltonian = hamiltonian.clone();
-        let ref_copy_moments = Arc::clone(&moments);
-        let ref_copy_temperature = Arc::clone(&temperature);
-        let ref_copy_external_field = Arc::clone(&external_field);
-        let ref_copy_scratch_region = Arc::clone(&scratch_region);
-        let scratch_len = scratch_region.lock().unwrap().len();
-        let thread = thread::Builder::new()
-            .spawn(move || loop {
-                let update_message = match receiver.recv() {
-                    Ok(update_message) => update_message,
-                    Err(_) => break,
-                };
-                // XXX TODO: try removing the barrier and moving the scratch mutex lock up here
-                // _should_ do the same thing, right?  or is there a chance the main thread
-                // will start copy_from_scratch before this thread even parses the message?
-                // cant lock before the message or it'd be perma-locked
-                let read_moments = moments.read().expect("Could not read moments");
-                let read_external_field = external_field
-                    .read()
-                    .expect("Could not read external field");
-
-                let update_loc = match update_message {
-                    UpdateMessage::Location(i, j) => vec![(i as i64, j as i64)],
-                    UpdateMessage::All => {
-                        let mut all_locs = Vec::new();
-                        for idx_absolute in
-                            scratch_offset..(scratch_offset + scratch_region.lock().unwrap().len())
-                        {
-                            all_locs.push((
-                                (idx_absolute / read_moments.n_columns) as i64,
-                                (idx_absolute % read_moments.n_columns) as i64,
-                            ));
-                        }
-                        all_locs
-                    }
-                    UpdateMessage::Stop => break, //kill the spawn loop and thus the thread
-                    UpdateMessage::Ignore => {
-                        //don't want this thread to do anything EXCEPT do its part to trigger the barrier
-                        scratch_barrier.wait();
-                        continue;
-                    }
-                    UpdateMessage::UpdateN(n) => {
-                        let mut rng = rand::thread_rng();
-                        let mut all_locs = Vec::new();
-
-                        for _i in 0..n {
-                            let local_offset = rng.gen_range(0..scratch_len);
-
-                            let (ui, uj) = linear_to_matrix_index(
-                                local_offset + scratch_offset,
-                                &(read_moments.n_columns, read_moments.n_rows),
-                            );
-                            all_locs.push((ui as i64, uj as i64));
-                        }
-                        all_locs
-                    }
-                };
-
-                {
-                    // mutex locked scope
-                    let mut scratch_region_locked = scratch_region
-                        .lock()
-                        .expect(&format!("couldn't lock scratch region for thread {id}"));
-                    for (i, j) in update_loc {
-                        let (ui, uj) = read_moments.wrap((i, j));
-
-                        let offset_linear_loc = ui * read_moments.n_columns + uj - scratch_offset;
-
-                        let e_site = hamiltonian(&read_moments, &read_external_field, &(i, j));
-                        let t_site = temperature.read().unwrap()[(ui, uj)];
-                        let p_state = (-e_site / t_site).exp()
-                            / ((-e_site / t_site).exp() + (e_site / t_site).exp());
-
-                        let this_moment = read_moments[(ui, uj)];
-
-                        let r: f64 = rand::random();
-                        if r > p_state {
-                            scratch_region_locked[offset_linear_loc] = -this_moment;
-                        } else {
-                            scratch_region_locked[offset_linear_loc] = this_moment;
-                        }
-                    }
-                }
-
-                scratch_barrier.wait();
-            })
-            .expect("Could not create thread");
-        UpdateWorker {
-            id,
-            sender,
-            thread: Some(thread),
-            moments: ref_copy_moments,
-            temperature: ref_copy_temperature,
-            external_field: ref_copy_external_field,
-            hamiltonian: ref_copy_hamiltonian,
-            scratch_region: ref_copy_scratch_region,
-            scratch_offset, //survives all the way to here via copy
-            scratch_len,
-        }
-    }
-}
-
-/// The possible messages that can be sent to an update worker.
-/// `Location(i, j)` indicates that the worker should update the site at row `i` and column `j`.
-/// `All` indicates that the worker should update all sites in its scratch region.
-/// `Ignore` indicates that the worker should ignore the message, but still trigger the barrier.
-/// `Stop` indicates that the worker should stop processing messages and exit.
-/// `UpdateN(n)` indicates that the worker should update `n` random sites in its scratch region.
-pub enum UpdateMessage {
-    Location(usize, usize),
-    All,
-    Ignore,
-    Stop,
-    UpdateN(usize),
-}
-
 /// The lattice struct is the main interface for the simulation.
 /// It contains the lattice data, temperature, and external field as matrices
 /// and it orchestrates each worker thread and its scratch region for making updates.
+///
+/// The lattice and its interactions wrap on both axes, so there are no edge effects...
+/// at the cost of this actually being a simulation of a torroidal lattice, not a planar one.
+/// Topologically speaking.
 pub struct Lattice<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send> {
     pub n_rows: usize,
     pub n_columns: usize,
@@ -497,7 +208,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
         self.can_wait_scratch_barrier = false;
     }
 
-    /// once you've created or hand-edited moments, copy them to the scratch regions
+    /// once you've created or externally edited the moments, copy them to the scratch regions
     /// so all elements are present when you copy them back after an update--that
     /// might not have touched every scratch_site.
     fn copy_to_scratch(&mut self) -> () {
@@ -521,7 +232,7 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
     }
 
     /// setter to write a new full matrix of moments to the lattice
-    /// and update scratch regions
+    /// *and* update scratch regions
     pub fn set_moments(&mut self, new_moments: Matrix<f64>) -> () {
         {
             //scope for moments write lock; must end before copy_to_scratch
@@ -537,7 +248,8 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
 
     /// using a `Config` and a hamiltonian function, creates a new lattice.
     /// Creates and initializes arrays and the workers with their threads
-    /// this also needs decomposition work.
+
+    // XXX TODO: this also needs decomposition work.
     pub fn new(c: &Config, hamiltonian: F) -> Lattice<F>
     where
         F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send,
@@ -695,16 +407,46 @@ impl<F: Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone + Send + 'sta
 ///
 /// note that the function needs to return the PER SITE energy, so hamiltonian
 /// is really the sum of this over all sites.
+///
+/// `mixin_map_hamiltonian` takes a rectangular "map" of interaction strengths
+/// and *returns* a hamiltonian, rather than being a hamiltonian itself.
+///
+/// J_ij is a typical notation for the map of interaction strengths, as used at
+/// the wikipedia link below.  This map must have odd dimensions, so the site
+/// in question can be at the center of the map. For each site, the energy is calculated
+/// by applying this map (which is likely much smaller than the lattice) to the surrounding
+/// sites.  Thus the ising hamiltonian has a 3x3 map with ones at (0,1), (1,0), (1,2), (2,1)
+/// and zeros elsewhere.  To be explicit, this makes the indices *relative* to the site,
+/// not absolute positions on the lattice.  This makes the map small and relatively dense,
+/// while J_ij with absolute i and j would be large and sparse.
+/// # Example
+/// This is a spin on the classic ising model, where there is ferromagnetic interaction
+/// with nearest neighbors--but also a mild antiferromagnetic interaction with the next-nearest
+/// neighbors.  It results in a structure that has a characteristic length scale of 2-3 sites,
+/// which isn't much of a surprise.
+/// ```
+/// use hello_rust::*;
+/// let hsize: (usize, usize) = (5, 5);
+/// let mut interaction_strenghts = Matrix::new(hsize.0, hsize.1, vec![0.0; hsize.0 * hsize.1]);
+/// interaction_strenghts[(2, 0)] = -0.5;
+/// interaction_strenghts[(0, 2)] = -0.5;
+/// interaction_strenghts[(2, 4)] = -0.5;
+/// interaction_strenghts[(4, 2)] = -0.5;
+/// interaction_strenghts[(1, 2)] = 1.0;
+/// interaction_strenghts[(2, 1)] = 1.0;
+/// interaction_strenghts[(3, 2)] = 1.0;
+/// interaction_strenghts[(2, 3)] = 1.0;
+/// let hamiltonian = mixin_map_hamiltonian(&interaction_strenghts);
+/// let mut lattice = Lattice::new(&c, hamiltonian);
+/// ```
 /// # See also
-/// `Lattice::energy()`
+/// * `Lattice::energy()`
 /// * [Wikipedia](https://en.wikipedia.org/wiki/Ising_model)
 
-/// `mixin_map_hamiltonian` takes a map of interaction strengths and returns a hamiltonian
-/// rather than being a hamiltonian itself
 pub fn mixin_map_hamiltonian(
-    hamiltonian_map: &Matrix<f64>,
+    interaction_strengths: &Matrix<f64>,
 ) -> impl Fn(&Matrix<f64>, &Matrix<f64>, &(i64, i64)) -> f64 + Clone {
-    let my_map = hamiltonian_map.clone();
+    let my_map = interaction_strengths.clone();
     return move |moments: &Matrix<f64>, external_field: &Matrix<f64>, index: &(i64, i64)| -> f64 {
         let site_moment = &moments[moments.wrap(*index)];
         let mut energy = -(site_moment) * external_field[external_field.wrap(*index)];
@@ -737,28 +479,33 @@ pub fn standard_ising_hamiltonian(
 }
 
 /// A hamiltonian function for Conway's Game of Life.  This is a cellular automaton
-/// as described by [`wikipedia`].  It's a silly "hamiltonian" but it does follow
+/// as described by [wikipedia](https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life).  
+/// It's a silly "hamiltonian" but it does follow
 /// the rules of the game of life, returning high energy when site should change
 /// and low energy when it should stay the same.
+/// # Rules
+/// * Any live cell with fewer than two live neighbors dies, as if by underpopulation.
+/// * Any live cell with two or three live neighbors lives on to the next generation.
+/// * Any live cell with more than three live neighbors dies, as if by overpopulation.
+/// * Any dead cell with exactly three live neighbors becomes a live cell, as if by reproduction.
+/// note that this is to produce the ENERGY of the site, not the state of it.  we want the correct state to
+/// have overwhelmingly less energy than the incorrect state, so `update` always selects it when it does its
+/// probability check.
 ///
 /// Interestingly, when at a finite temperature, this framework models the game
 /// of life--with a chance for a cell to violate the rules.  It's stateless, though
-/// so it's not really modeling mutations or something: a cell that survives 4
+/// so it's not really modeling mutations or anything: a cell that survives 4
 /// neighbors one turn might die due to the same 4 neighbors the next.
-/// [`wikipedia`]: https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life
+///
+/// Likewise, a background "magnetic field" here functions as a bias towards extra
+/// cells growing or dying, in violation of the rules above.
+/// # See also
+/// [wikipedia](https://en.wikipedia.org/wiki/Conway%27s_Game_of_Life)
 pub fn conway_life_hamiltonian(
     moments: &Matrix<f64>,
     background_field: &Matrix<f64>,
     index: &(i64, i64),
 ) -> f64 {
-    // Any live cell with fewer than two live neighbors dies, as if by underpopulation.
-    // Any live cell with two or three live neighbors lives on to the next generation.
-    // Any live cell with more than three live neighbors dies, as if by overpopulation.
-    // Any dead cell with exactly three live neighbors becomes a live cell, as if by reproduction.
-    // note that this is to produce the ENERGY of the site, not the state of it.  we want the correct state to
-    // have overwhelmingly less energy than the incorrect state, so `update` always selects it when it does its
-    // probability check.
-
     let mut n_neighbors = 0;
     let offset = (1, 1);
     let mut site_state = 0.0; //always overwritten but compiler doesn't know that
@@ -818,15 +565,6 @@ pub fn find_slot_index<T: PartialOrd>(vec: &Vec<T>, value: &T) -> usize {
         }
     }
     return index;
-}
-
-/// helper function to convert a linear index to a matrix index
-/// helpful with scratch regions vs moments matrix
-pub fn linear_to_matrix_index(
-    linear_index: usize,
-    &(n_cols, _n_rows): &(usize, usize),
-) -> (usize, usize) {
-    (linear_index / n_cols, linear_index % n_cols)
 }
 
 #[cfg(test)]
