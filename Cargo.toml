@@ -2,7 +2,8 @@
 name = "ising_toy"
 version = "0.2.0"
 edition = "2021"
-
+description = "A generalizable Ising model in Rust. Will also do Conway's game of life right out of the box."
+license = "GPL-2.0-or-later"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
